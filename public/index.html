@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>ChatApp</title>
+  <meta name="theme-color" content="#008069" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#202c33" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="ChatApp">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <div id="conn" hidden>Connecting…</div>
+
+    <aside id="sidebar">
+      <header class="bar">
+        <div id="me" class="avatar"></div>
+        <div class="grow title">Chats</div>
+        <button id="btn-new" class="icon-btn" aria-label="New chat" title="New chat">
+          <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+        </button>
+        <div class="menu-wrap">
+          <button id="btn-menu" class="icon-btn" aria-label="Menu" title="Menu">
+            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+          </button>
+          <div id="menu" class="menu" hidden>
+            <div id="menu-who" class="menu-who"></div>
+            <button id="menu-notif">Enable notifications</button>
+            <button id="menu-logout">Log out</button>
+          </div>
+        </div>
+      </header>
+      <div class="searchbox"><input id="filter" type="search" placeholder="Search chats" autocomplete="off" aria-label="Search chats"></div>
+      <div id="chatlist" role="list"></div>
+      <div id="list-empty" class="empty-note" hidden>No chats yet.<br>Tap <b>+</b> to start one.</div>
+    </aside>
+
+    <main id="conv">
+      <div id="placeholder">
+        <svg viewBox="0 0 24 24" width="84" height="84"><path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-5 4V6a2 2 0 0 1 1-2z" opacity=".35"/></svg>
+        <h2>ChatApp</h2>
+        <p>Select a chat, or start a new one with the <b>+</b> button.</p>
+      </div>
+      <section id="thread" hidden>
+        <header class="bar" id="convhead">
+          <button id="btn-back" class="icon-btn" aria-label="Back">
+            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20z"/></svg>
+          </button>
+          <div id="head-avatar" class="avatar"></div>
+          <div class="grow headtext">
+            <div id="head-name" class="title"></div>
+            <div id="head-status" class="sub"></div>
+          </div>
+        </header>
+        <div id="messages" aria-live="polite"></div>
+        <form id="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Type a message" aria-label="Message" enterkeyhint="send" maxlength="4000"></textarea>
+          <button id="btn-send" type="submit" class="send" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+          </button>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal" hidden></div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
