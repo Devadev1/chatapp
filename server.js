@@ -16,6 +16,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const IS_HTTPS = BASE_URL.startsWith('https://');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const PUBLIC = path.join(__dirname, 'public');
 
 const OIDC_ISSUER = (process.env.OIDC_ISSUER || 'https://accounts.google.com').replace(/\/$/, '');
@@ -30,10 +31,14 @@ const ALLOWED_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS || '')
   .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 const MAX_TEXT = 4000;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp']);
+const REACTION_EMOJIS = new Set(['👍', '❤️', '😂', '😮', '😢', '🙏']);
 const MAX_WS_PAYLOAD = 64 * 1024;
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 let SECRET = process.env.SESSION_SECRET;
 if (!SECRET) {
@@ -93,15 +98,35 @@ function json(res, status, obj) {
 function redirect(res, to) { res.writeHead(302, { Location: to, 'Cache-Control': 'no-store' }); res.end(); }
 function readBody(req, limit = 16 * 1024) {
   return new Promise((resolve, reject) => {
-    const chunks = []; let size = 0;
+    const chunks = []; let size = 0, tooLarge = false;
     req.on('data', (c) => {
+      if (tooLarge) return;
       size += c.length;
-      if (size > limit) { reject(Object.assign(new Error('payload too large'), { status: 413 })); req.destroy(); return; }
+      if (size > limit) {
+        tooLarge = true; chunks.length = 0;
+        reject(Object.assign(new Error('payload too large'), { status: 413 }));
+        return;
+      }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    req.on('end', () => { if (!tooLarge) resolve(Buffer.concat(chunks)); });
+    req.on('error', (err) => { if (!tooLarge) reject(err); });
   });
+}
+function parseUploadName(value) {
+  let name;
+  try { name = decodeURIComponent(value); } catch { throw Object.assign(new Error('invalid file name'), { status: 400 }); }
+  name = name.replace(/\\/g, '/').split('/').pop().replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 255);
+  if (!name || name === '.' || name === '..') throw Object.assign(new Error('invalid file name'), { status: 400 });
+  return name;
+}
+function detectImageType(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6))) return 'image/gif';
+  if (buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buffer.length >= 2 && buffer.toString('ascii', 0, 2) === 'BM') return 'image/bmp';
+  return null;
 }
 async function readJSON(req) {
   const b = await readBody(req);
@@ -139,20 +164,27 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { flush(); proces
 const conns = new Map(); // userId -> Set<WS>
 const isOnline = (id) => (conns.get(id)?.size || 0) > 0;
 const pub = (u) => ({ id: u.id, name: u.name, email: u.email, picture: u.picture || null, online: isOnline(u.id), lastSeen: u.lastSeen || null });
+function messageView(msg) {
+  const { deletedFor, ...view } = msg;
+  return view;
+}
 
 function chatView(chat, uid) {
   const msgs = db.messages[chat.id] || [];
   let unread = 0;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
+    if (m.deletedFor?.includes(uid)) continue;
     if (m.from === uid) continue;
     if (m.readBy.includes(uid)) break;
     unread++;
   }
+  const lastMsg = [...msgs].reverse().find((msg) => !msg.deletedFor?.includes(uid));
+  const last = lastMsg ? messageView(lastMsg) : null;
   return {
     id: chat.id, type: chat.type, name: chat.name || null, createdAt: chat.createdAt, createdBy: chat.createdBy,
     members: chat.members.map((id) => db.users[id]).filter(Boolean).map(pub),
-    last: msgs[msgs.length - 1] || null,
+    last,
     unread,
   };
 }
@@ -177,6 +209,7 @@ function mark(userId, kind, onlyChat) {
     const msgs = db.messages[chat.id] || [];
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
+      if (m.deletedFor?.includes(userId)) continue;
       if (m.from === userId) continue;
       const list = kind === 'read' ? m.readBy : m.deliveredTo;
       if (list.includes(userId)) break;
@@ -202,18 +235,33 @@ function remember(key, msg) {
   if (recent.size > 5000) recent.delete(recent.keys().next().value);
 }
 
-function postMessage(user, ws, { chatId, text, cid }) {
+function messageInChat(chatId, messageId) {
+  return (db.messages[chatId] || []).find((msg) => msg.id === messageId);
+}
+function attachmentIsReferenced(fileId) {
+  return Object.values(db.messages).some((messages) => messages.some((msg) => msg.attachment?.id === fileId));
+}
+function postMessage(user, ws, { chatId, text, cid, replyTo }) {
   const chat = db.chats[chatId];
   if (!chat || !chat.members.includes(user.id)) return ws.send(JSON.stringify({ t: 'error', cid, error: 'not a member' }));
   if (typeof text !== 'string') return;
   text = text.replace(/\r\n/g, '\n').trim();
   if (!text || text.length > MAX_TEXT) return ws.send(JSON.stringify({ t: 'error', cid, error: 'invalid message' }));
+  let reply = null;
+  if (replyTo != null) {
+    const original = typeof replyTo === 'string' && messageInChat(chat.id, replyTo);
+    if (!original || original.deletedFor?.includes(user.id)) return ws.send(JSON.stringify({ t: 'error', cid, error: 'reply message not found' }));
+    reply = {
+      id: original.id, from: original.from, text: original.text || '',
+      attachment: original.attachment ? { name: original.attachment.name } : null,
+    };
+  }
 
   const key = cid ? `${user.id}:${cid}` : null;
   let msg = key && recent.get(key);
   const duplicate = Boolean(msg);
   if (!msg) {
-    msg = { id: crypto.randomUUID(), chatId, from: user.id, text, ts: now(), deliveredTo: [], readBy: [] };
+    msg = { id: crypto.randomUUID(), chatId, from: user.id, text, replyTo: reply, ts: now(), deliveredTo: [], readBy: [] };
     for (const id of chat.members) if (id !== user.id && isOnline(id)) msg.deliveredTo.push(id);
     (db.messages[chatId] ||= []).push(msg);
     if (key) remember(key, msg);
@@ -430,14 +478,170 @@ async function apiRoutes(req, res, url, user) {
     return json(res, 200, { chat: chatView(chat, user.id) });
   }
 
+  const forward = p.match(/^\/api\/chats\/([\w-]+)\/forward$/);
+  if (req.method === 'POST' && forward) {
+    const destination = db.chats[forward[1]];
+    const body = await readJSON(req);
+    if (!body || typeof body !== 'object') return json(res, 400, { error: 'invalid forward request' });
+    const source = db.chats[body.sourceChatId];
+    if (!destination?.members.includes(user.id) || !source?.members.includes(user.id)) return json(res, 404, { error: 'not found' });
+    const original = messageInChat(source.id, body.messageId);
+    if (!original || original.deletedFor?.includes(user.id)) return json(res, 404, { error: 'message not found' });
+    const msg = {
+      id: crypto.randomUUID(), chatId: destination.id, from: user.id, text: original.text || '',
+      forwarded: true,
+      forwardedFrom: { id: original.from, name: db.users[original.from]?.name || 'Unknown' },
+      ts: now(), deliveredTo: destination.members.filter((id) => id !== user.id && isOnline(id)), readBy: [],
+    };
+    if (original.attachment) msg.attachment = { ...original.attachment };
+    (db.messages[destination.id] ||= []).push(msg);
+    save();
+    for (const id of destination.members) sendTo(id, { t: 'message', msg });
+    return json(res, 201, { message: msg });
+  }
+
+  const messageAction = p.match(/^\/api\/chats\/([\w-]+)\/messages\/([\w-]+)$/);
+  if (messageAction && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const chat = db.chats[messageAction[1]];
+    if (!chat || !chat.members.includes(user.id)) return json(res, 404, { error: 'not found' });
+    const messages = db.messages[chat.id] || [];
+    const index = messages.findIndex((msg) => msg.id === messageAction[2]);
+    if (index < 0) return json(res, 404, { error: 'message not found' });
+    const msg = messages[index];
+
+    if (req.method === 'PATCH') {
+      if (msg.deletedFor?.includes(user.id)) return json(res, 404, { error: 'message not found' });
+      if (msg.from !== user.id) return json(res, 403, { error: 'you can only edit your own messages' });
+      const body = await readJSON(req);
+      if (msg.attachment) return json(res, 400, { error: 'file messages cannot be edited' });
+      if (!body || typeof body !== 'object' || typeof body.text !== 'string') return json(res, 400, { error: 'message text required' });
+      const text = body.text.replace(/\r\n/g, '\n').trim();
+      if (!text || text.length > MAX_TEXT) return json(res, 400, { error: 'invalid message' });
+      msg.text = text; msg.editedAt = now(); save();
+      for (const id of chat.members) sendTo(id, { t: 'messageupdate', msg: messageView(msg) });
+      return json(res, 200, { message: messageView(msg) });
+    }
+
+    const body = await readJSON(req);
+    if (!body || typeof body !== 'object') return json(res, 400, { error: 'invalid delete request' });
+    if (body.forEveryone === true) {
+      if (msg.from !== user.id) return json(res, 403, { error: 'you can only delete your own messages for everyone' });
+      messages.splice(index, 1);
+      if (msg.attachment && !attachmentIsReferenced(msg.attachment.id)) {
+        try { fs.unlinkSync(path.join(UPLOAD_DIR, msg.attachment.id)); } catch (err) {
+          if (err.code !== 'ENOENT') { messages.splice(index, 0, msg); throw err; }
+        }
+      }
+      save();
+      for (const id of chat.members) sendTo(id, { t: 'messagedeleted', chatId: chat.id, messageId: msg.id, chat: chatView(chat, id) });
+      return json(res, 200, { chat: chatView(chat, user.id) });
+    }
+
+    msg.deletedFor ||= [];
+    if (!msg.deletedFor.includes(user.id)) {
+      msg.deletedFor.push(user.id);
+      save();
+    }
+    const userChat = chatView(chat, user.id);
+    sendTo(user.id, { t: 'messagehidden', chatId: chat.id, messageId: msg.id, chat: userChat });
+    return json(res, 200, { chat: userChat });
+  }
+
+  const reaction = p.match(/^\/api\/chats\/([\w-]+)\/messages\/([\w-]+)\/reactions$/);
+  if (req.method === 'POST' && reaction) {
+    const chat = db.chats[reaction[1]];
+    if (!chat || !chat.members.includes(user.id)) return json(res, 404, { error: 'not found' });
+    const msg = messageInChat(chat.id, reaction[2]);
+    if (!msg || msg.deletedFor?.includes(user.id)) return json(res, 404, { error: 'message not found' });
+    const body = await readJSON(req);
+    if (!body || typeof body !== 'object') return json(res, 400, { error: 'invalid reaction' });
+    const { emoji } = body;
+    if (!REACTION_EMOJIS.has(emoji)) return json(res, 400, { error: 'invalid reaction' });
+    msg.reactions ||= {};
+    const users = new Set(msg.reactions[emoji] || []);
+    if (users.has(user.id)) users.delete(user.id); else users.add(user.id);
+    if (users.size) msg.reactions[emoji] = [...users]; else delete msg.reactions[emoji];
+    if (!Object.keys(msg.reactions).length) delete msg.reactions;
+    save();
+    for (const id of chat.members) sendTo(id, { t: 'messageupdate', msg: messageView(msg) });
+    return json(res, 200, { message: messageView(msg) });
+  }
+
+  const upload = p.match(/^\/api\/chats\/([\w-]+)\/files$/);
+  if (req.method === 'POST' && upload) {
+    const chat = db.chats[upload[1]];
+    if (!chat || !chat.members.includes(user.id)) return json(res, 404, { error: 'not found' });
+    const contentLength = Number(req.headers['content-length']);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BYTES) return json(res, 413, { error: 'file exceeds the 10 MB limit' });
+    const name = parseUploadName(req.headers['x-file-name'] || '');
+    const replyToId = req.headers['x-reply-to'];
+    let reply = null;
+    if (replyToId) {
+      const original = messageInChat(chat.id, replyToId);
+      if (!original || original.deletedFor?.includes(user.id)) return json(res, 400, { error: 'reply message not found' });
+      reply = {
+        id: original.id, from: original.from, text: original.text || '',
+        attachment: original.attachment ? { name: original.attachment.name } : null,
+      };
+    }
+    const body = await readBody(req, MAX_UPLOAD_BYTES);
+    const type = detectImageType(body);
+    if (!type) return json(res, 415, { error: 'only JPEG, PNG, GIF, WebP, or BMP images are supported' });
+    const fileId = crypto.randomUUID();
+    fs.writeFileSync(path.join(UPLOAD_DIR, fileId), body, { flag: 'wx', mode: 0o600 });
+    const msg = {
+      id: crypto.randomUUID(), chatId: chat.id, from: user.id, text: '',
+      attachment: { id: fileId, name, size: body.length, type },
+      replyTo: reply, ts: now(), deliveredTo: chat.members.filter((id) => id !== user.id && isOnline(id)), readBy: [],
+    };
+    (db.messages[chat.id] ||= []).push(msg);
+    save();
+    for (const id of chat.members) sendTo(id, { t: 'message', msg });
+    return json(res, 201, { message: msg });
+  }
+
+  const download = p.match(/^\/api\/files\/([\da-f-]{36})$/i);
+  if (req.method === 'GET' && download) {
+    const fileId = download[1];
+    let attachment;
+    for (const chat of Object.values(db.chats)) {
+      if (!chat.members.includes(user.id)) continue;
+      attachment = (db.messages[chat.id] || []).find((msg) => msg.attachment?.id === fileId && !msg.deletedFor?.includes(user.id))?.attachment;
+      if (attachment) break;
+    }
+    if (!attachment) return json(res, 404, { error: 'not found' });
+    const filePath = path.join(UPLOAD_DIR, fileId);
+    fs.stat(filePath, (err, stat) => {
+      if (err) {
+        if (err.code === 'ENOENT') return json(res, 404, { error: 'file not found' });
+        console.error(err); return json(res, 500, { error: 'file unavailable' });
+      }
+      if (!stat.isFile()) return json(res, 404, { error: 'file not found' });
+      const encodedName = encodeURIComponent(attachment.name).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+      const inlinePreview = url.searchParams.get('preview') === '1'
+        && url.searchParams.get('download') !== '1' && IMAGE_TYPES.has(attachment.type);
+      res.writeHead(200, {
+        'Content-Type': inlinePreview ? attachment.type : 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Content-Disposition': `${inlinePreview ? 'inline' : 'attachment'}; filename="${inlinePreview ? 'preview' : 'download'}"; filename*=UTF-8''${encodedName}`,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'no-store',
+      });
+      const stream = fs.createReadStream(filePath);
+      stream.on('error', (streamErr) => { console.error(streamErr); res.destroy(streamErr); });
+      stream.pipe(res);
+    });
+    return;
+  }
+
   const m = p.match(/^\/api\/chats\/([\w-]+)\/messages$/);
   if (req.method === 'GET' && m) {
     const chat = db.chats[m[1]];
     if (!chat || !chat.members.includes(user.id)) return json(res, 404, { error: 'not found' });
     const before = Number(url.searchParams.get('before')) || Infinity;
     const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 100);
-    const all = (db.messages[chat.id] || []).filter((x) => x.ts < before);
-    return json(res, 200, { messages: all.slice(-limit), more: all.length > limit });
+    const all = (db.messages[chat.id] || []).filter((x) => x.ts < before && !x.deletedFor?.includes(user.id));
+    return json(res, 200, { messages: all.slice(-limit).map(messageView), more: all.length > limit });
   }
   return json(res, 404, { error: 'not found' });
 }

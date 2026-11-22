@@ -60,10 +60,25 @@
         </header>
         <div id="messages" aria-live="polite"></div>
         <form id="composer" autocomplete="off">
-          <textarea id="input" rows="1" placeholder="Type a message" aria-label="Message" enterkeyhint="send" maxlength="4000"></textarea>
-          <button id="btn-send" type="submit" class="send" aria-label="Send">
-            <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
-          </button>
+          <div id="emoji-picker" class="emoji-picker" role="dialog" aria-label="Emoji picker" hidden></div>
+          <div id="reply-preview" class="reply-preview" hidden>
+            <div class="reply-copy">
+              <div id="reply-name" class="reply-name"></div>
+              <div id="reply-text" class="reply-text"></div>
+            </div>
+            <button id="btn-cancel-reply" type="button" class="icon-btn" aria-label="Cancel reply">×</button>
+          </div>
+          <div class="composer-row">
+            <input id="file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple hidden>
+            <button id="btn-attach" type="button" class="attach-toggle" aria-label="Attach images" title="Attach images (10 MB max)">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l10-10a4 4 0 0 1 5.66 5.66l-10 10a2 2 0 0 1-2.83-2.83l9.19-9.19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button id="btn-emoji" type="button" class="emoji-toggle" aria-label="Choose emoji" aria-controls="emoji-picker" aria-expanded="false">😊</button>
+            <textarea id="input" rows="1" placeholder="Type a message" aria-label="Message" enterkeyhint="send" maxlength="4000"></textarea>
+            <button id="btn-send" type="submit" class="send" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+            </button>
+          </div>
         </form>
       </section>
     </main>
