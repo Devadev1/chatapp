@@ -68,12 +68,16 @@
             </div>
             <button id="btn-cancel-reply" type="button" class="icon-btn" aria-label="Cancel reply">×</button>
           </div>
+          <div id="voice-preview" class="voice-preview" aria-live="polite" hidden></div>
           <div class="composer-row">
             <input id="file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/bmp" multiple hidden>
             <button id="btn-attach" type="button" class="attach-toggle" aria-label="Attach images" title="Attach images (10 MB max)">
               <svg viewBox="0 0 24 24" width="22" height="22"><path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l10-10a4 4 0 0 1 5.66 5.66l-10 10a2 2 0 0 1-2.83-2.83l9.19-9.19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <button id="btn-emoji" type="button" class="emoji-toggle" aria-label="Choose emoji" aria-controls="emoji-picker" aria-expanded="false">😊</button>
+            <button id="btn-voice" type="button" class="voice-toggle" aria-label="Record voice note" title="Record voice note">
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg>
+            </button>
             <textarea id="input" rows="1" placeholder="Type a message" aria-label="Message" enterkeyhint="send" maxlength="4000"></textarea>
             <button id="btn-send" type="submit" class="send" aria-label="Send">
               <svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>

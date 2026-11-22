@@ -33,6 +33,7 @@ const ALLOWED_DOMAINS = (process.env.ALLOWED_EMAIL_DOMAINS || '')
 const MAX_TEXT = 4000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp']);
+const VOICE_NOTE_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/mp4']);
 const REACTION_EMOJIS = new Set(['👍', '❤️', '😂', '😮', '😢', '🙏']);
 const MAX_WS_PAYLOAD = 64 * 1024;
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
@@ -126,6 +127,13 @@ function detectImageType(buffer) {
   if (buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6))) return 'image/gif';
   if (buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
   if (buffer.length >= 2 && buffer.toString('ascii', 0, 2) === 'BM') return 'image/bmp';
+  return null;
+}
+function detectVoiceType(buffer, declaredType) {
+  const type = String(declaredType || '').split(';')[0].trim().toLowerCase();
+  if (type === 'audio/webm' && buffer.length >= 4 && buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return type;
+  if (type === 'audio/ogg' && buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'OggS') return type;
+  if (type === 'audio/mp4' && buffer.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp') return type;
   return null;
 }
 async function readJSON(req) {
@@ -600,6 +608,39 @@ async function apiRoutes(req, res, url, user) {
     return json(res, 201, { message: msg });
   }
 
+  const voiceUpload = p.match(/^\/api\/chats\/([\w-]+)\/voice-notes$/);
+  if (req.method === 'POST' && voiceUpload) {
+    const chat = db.chats[voiceUpload[1]];
+    if (!chat || !chat.members.includes(user.id)) return json(res, 404, { error: 'not found' });
+    const contentLength = Number(req.headers['content-length']);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BYTES) return json(res, 413, { error: 'voice note exceeds the 10 MB limit' });
+    const replyToId = req.headers['x-reply-to'];
+    let reply = null;
+    if (replyToId) {
+      const original = messageInChat(chat.id, replyToId);
+      if (!original || original.deletedFor?.includes(user.id)) return json(res, 400, { error: 'reply message not found' });
+      reply = {
+        id: original.id, from: original.from, text: original.text || '',
+        attachment: original.attachment ? { name: original.attachment.name } : null,
+      };
+    }
+    const body = await readBody(req, MAX_UPLOAD_BYTES);
+    const type = detectVoiceType(body, req.headers['x-voice-type']);
+    if (!type || !VOICE_NOTE_TYPES.has(type)) return json(res, 415, { error: 'unsupported voice note format' });
+    const extension = type === 'audio/webm' ? 'webm' : type === 'audio/ogg' ? 'ogg' : 'm4a';
+    const fileId = crypto.randomUUID();
+    fs.writeFileSync(path.join(UPLOAD_DIR, fileId), body, { flag: 'wx', mode: 0o600 });
+    const msg = {
+      id: crypto.randomUUID(), chatId: chat.id, from: user.id, text: '',
+      attachment: { id: fileId, name: `voice-note.${extension}`, size: body.length, type, voiceNote: true },
+      replyTo: reply, ts: now(), deliveredTo: chat.members.filter((id) => id !== user.id && isOnline(id)), readBy: [],
+    };
+    (db.messages[chat.id] ||= []).push(msg);
+    save();
+    for (const id of chat.members) sendTo(id, { t: 'message', msg });
+    return json(res, 201, { message: msg });
+  }
+
   const download = p.match(/^\/api\/files\/([\da-f-]{36})$/i);
   if (req.method === 'GET' && download) {
     const fileId = download[1];
@@ -620,10 +661,13 @@ async function apiRoutes(req, res, url, user) {
       const encodedName = encodeURIComponent(attachment.name).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
       const inlinePreview = url.searchParams.get('preview') === '1'
         && url.searchParams.get('download') !== '1' && IMAGE_TYPES.has(attachment.type);
+      const inlineVoiceNote = url.searchParams.get('play') === '1'
+        && url.searchParams.get('download') !== '1' && attachment.voiceNote && VOICE_NOTE_TYPES.has(attachment.type);
+      const inline = inlinePreview || inlineVoiceNote;
       res.writeHead(200, {
-        'Content-Type': inlinePreview ? attachment.type : 'application/octet-stream',
+        'Content-Type': inline ? attachment.type : 'application/octet-stream',
         'Content-Length': stat.size,
-        'Content-Disposition': `${inlinePreview ? 'inline' : 'attachment'}; filename="${inlinePreview ? 'preview' : 'download'}"; filename*=UTF-8''${encodedName}`,
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${inlinePreview ? 'preview' : inlineVoiceNote ? 'voice-note' : 'download'}"; filename*=UTF-8''${encodedName}`,
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'no-store',
       });

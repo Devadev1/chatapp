@@ -17,12 +17,18 @@
   const MAX_TEXT = 4000;
   const MAX_FILE_BYTES = 10 * 1024 * 1024;
   const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp']);
+  const VOICE_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/mp4']);
+  const VOICE_MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  const MIC_ICON = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg>';
+  const STOP_ICON = '<span class="voice-stop-icon" aria-hidden="true">■</span>';
 
   const S = {
     me: null, chats: new Map(), msgs: new Map(), more: new Map(), active: null,
     typing: new Map(), outbox: [], ws: null, wsOpen: false, retry: 0, reconnectTimer: null, gotReady: false, filter: '',
-    directory: new Map(), renderDirectory: null, animatedReads: new WeakSet(), replyTo: null,
+    directory: new Map(), renderDirectory: null, refreshDirectory: null, animatedReads: new WeakSet(), replyTo: null,
   };
+  let voiceRecorder = null, voiceStream = null, voiceChunks = [], voiceBlob = null, voiceUrl = null;
+  let voiceTimer = null, voiceStartedAt = 0, voiceSize = 0, discardVoiceRecording = false;
 
   /* ───────── api ───────── */
   async function api(path, opts = {}) {
@@ -202,7 +208,17 @@
       }
       if (m.attachment) {
         const fileUrl = `/api/files/${encodeURIComponent(m.attachment.id)}`;
-        if (IMAGE_TYPES.has(m.attachment.type)) {
+        if (m.attachment.voiceNote) {
+          const player = el('audio', {
+            class: 'voice-player', controls: true, preload: 'metadata',
+            src: `${fileUrl}?play=1`, 'aria-label': 'Voice note',
+          });
+          const download = el('a', {
+            class: 'voice-download', href: `${fileUrl}?download=1`, download: m.attachment.name,
+            'aria-label': 'Download voice note',
+          }, el('span', { text: 'Download voice note' }), el('span', { class: 'file-size', text: fileSizeText(m.attachment.size) }));
+          bubble.append(el('div', { class: 'voice-attachment' }, player, download));
+        } else if (IMAGE_TYPES.has(m.attachment.type)) {
           const preview = el('button', {
             class: 'image-preview', type: 'button', 'aria-label': `Show preview of ${m.attachment.name}`,
             onclick: () => {
@@ -285,6 +301,7 @@
     else closeChat();
   }
   function closeChat() {
+    if (voiceRecorder || voiceBlob) discardVoiceNote();
     S.active = null;
     clearReplyTarget();
     document.body.classList.remove('chat-open');
@@ -292,6 +309,7 @@
     renderList();
   }
   async function openChat(id) {
+    if (S.active && S.active !== id && (voiceRecorder || voiceBlob)) discardVoiceNote();
     if (S.replyTo && S.replyTo.chatId !== id) clearReplyTarget();
     S.active = id;
     const chat = S.chats.get(id);
@@ -356,6 +374,7 @@
       case 'ready':
         S.gotReady = true; S.wsOpen = true; S.retry = 0; setConn(true);
         resync().then(flushOutbox).catch(console.error);
+        S.refreshDirectory?.();
         break;
       case 'message': onMessage(m.msg, m.cid); break;
       case 'messageupdate': onMessageUpdate(m.msg); break;
@@ -610,6 +629,151 @@
     renderList(); renderMessages({ stick: true });
     return true;
   }
+  function stopVoiceStream() {
+    if (!voiceStream) return;
+    for (const track of voiceStream.getTracks()) track.stop();
+    voiceStream = null;
+  }
+  function setVoiceButton(recording) {
+    const button = $('#btn-voice');
+    button.classList.toggle('recording', recording);
+    button.disabled = !recording && Boolean(voiceBlob);
+    button.setAttribute('aria-label', recording ? 'Stop recording' : 'Record voice note');
+    button.title = recording ? 'Stop recording' : 'Record voice note';
+    button.innerHTML = recording ? STOP_ICON : MIC_ICON;
+  }
+  function resetVoiceDraft() {
+    clearInterval(voiceTimer);
+    voiceTimer = null;
+    stopVoiceStream();
+    if (voiceUrl) URL.revokeObjectURL(voiceUrl);
+    voiceUrl = null;
+    voiceBlob = null;
+    voiceRecorder = null;
+    voiceChunks = [];
+    voiceSize = 0;
+    discardVoiceRecording = false;
+    const preview = $('#voice-preview');
+    preview.replaceChildren();
+    preview.hidden = true;
+    setVoiceButton(false);
+  }
+  function discardVoiceNote() {
+    clearInterval(voiceTimer);
+    voiceTimer = null;
+    if (voiceRecorder && !voiceBlob) {
+      discardVoiceRecording = true;
+      if (voiceRecorder.state !== 'inactive') voiceRecorder.stop();
+      stopVoiceStream();
+      return;
+    }
+    resetVoiceDraft();
+  }
+  async function sendVoiceNote(button) {
+    if (!voiceBlob) return;
+    const chat = S.chats.get(S.active);
+    if (!chat) { toast('Open a chat before sending a voice note'); return; }
+    const blob = voiceBlob;
+    const type = blob.type.split(';')[0].toLowerCase();
+    if (!VOICE_TYPES.has(type)) { toast('This browser recorded an unsupported audio format'); return; }
+    const replyTo = S.replyTo?.chatId === chat.id ? S.replyTo.id : null;
+    button.disabled = true;
+    try {
+      const { message } = await api(`/api/chats/${encodeURIComponent(chat.id)}/voice-notes`, {
+        method: 'POST', rawBody: true,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Voice-Type': type,
+          ...(replyTo ? { 'X-Reply-To': replyTo } : {}),
+        },
+        body: blob,
+      });
+      onMessage(message);
+      if (replyTo && S.replyTo?.id === replyTo) clearReplyTarget();
+      resetVoiceDraft();
+    } catch (e) { toast(e.message); }
+    finally { button.disabled = false; }
+  }
+  async function startVoiceRecording() {
+    if (!S.active) { toast('Open a chat before recording a voice note'); return; }
+    if (voiceBlob) { toast('Send or cancel the current voice note first'); return; }
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      toast('Voice recording is not supported in this browser');
+      return;
+    }
+    try {
+      voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = typeof MediaRecorder.isTypeSupported === 'function'
+        ? VOICE_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type))
+        : '';
+      voiceRecorder = mimeType ? new MediaRecorder(voiceStream, { mimeType }) : new MediaRecorder(voiceStream);
+      const recorder = voiceRecorder;
+      voiceChunks = [];
+      voiceSize = 0;
+      discardVoiceRecording = false;
+      voiceStartedAt = Date.now();
+      const elapsed = el('span', { class: 'voice-elapsed', text: '0:00' });
+      const preview = $('#voice-preview');
+      preview.replaceChildren(
+        el('span', { class: 'recording-dot', 'aria-hidden': 'true' }),
+        el('span', { class: 'recording-label', text: 'Recording' }),
+        elapsed,
+        el('button', { class: 'action-button', type: 'button', text: 'Cancel', onclick: discardVoiceNote }),
+      );
+      preview.hidden = false;
+      voiceTimer = setInterval(() => {
+        const seconds = Math.floor((Date.now() - voiceStartedAt) / 1000);
+        elapsed.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+      }, 250);
+      recorder.ondataavailable = (event) => {
+        if (!event.data.size) return;
+        voiceChunks.push(event.data);
+        voiceSize += event.data.size;
+        if (voiceSize > MAX_FILE_BYTES && !discardVoiceRecording) {
+          toast('Voice note reached the 10 MB limit');
+          discardVoiceNote();
+        }
+      };
+      recorder.onerror = (event) => {
+        console.error(event.error || event);
+        toast('Voice recording failed');
+        discardVoiceNote();
+      };
+      recorder.onstop = () => {
+        clearInterval(voiceTimer);
+        voiceTimer = null;
+        stopVoiceStream();
+        if (discardVoiceRecording) { resetVoiceDraft(); return; }
+        const chunkType = voiceChunks.find((chunk) => chunk.type)?.type || '';
+        const type = (recorder.mimeType || chunkType).split(';')[0].toLowerCase();
+        if (!VOICE_TYPES.has(type)) {
+          toast('This browser recorded an unsupported audio format');
+          resetVoiceDraft();
+          return;
+        }
+        voiceBlob = new Blob(voiceChunks, { type });
+        if (!voiceBlob.size) {
+          toast('No audio was recorded');
+          resetVoiceDraft();
+          return;
+        }
+        voiceUrl = URL.createObjectURL(voiceBlob);
+        const audio = el('audio', { class: 'voice-player', controls: true, preload: 'metadata', src: voiceUrl, 'aria-label': 'Voice note preview' });
+        const send = el('button', { class: 'action-button primary-action', type: 'button', text: 'Send', onclick: () => sendVoiceNote(send) });
+        const actions = el('div', { class: 'voice-draft-actions' },
+          el('button', { class: 'action-button', type: 'button', text: 'Cancel', onclick: discardVoiceNote }),
+          send);
+        preview.replaceChildren(audio, actions);
+        preview.hidden = false;
+        setVoiceButton(false);
+      };
+      recorder.start(1000);
+      setVoiceButton(true);
+    } catch (e) {
+      resetVoiceDraft();
+      toast(e.name === 'NotAllowedError' ? 'Microphone permission was denied' : e.message || 'Could not start recording');
+    }
+  }
   function flushOutbox() { if (S.wsOpen) for (const o of S.outbox) wsSend(o); }
 
   let lastTyping = 0;
@@ -635,7 +799,7 @@
     const modal = $('#modal');
     let mode = 'pick', users = [], selected = new Map(), q = '', closed = false, seq = 0;
     const close = () => {
-      closed = true; clearTimeout(draw.t); S.renderDirectory = null; S.directory.clear();
+      closed = true; clearTimeout(draw.t); S.renderDirectory = null; S.refreshDirectory = null; S.directory.clear();
       modal.hidden = true; modal.replaceChildren();
     };
     modal.onclick = (e) => { if (e.target === modal) close(); };
@@ -709,6 +873,7 @@
     }
     draw.shown = false;
     S.renderDirectory = draw;
+    S.refreshDirectory = fetchUsers;
     fetchUsers();
   }
 
@@ -737,6 +902,12 @@
     const fileInput = $('#file-input');
     $('#btn-attach').addEventListener('pointerdown', (e) => e.preventDefault());
     $('#btn-attach').addEventListener('click', () => fileInput.click());
+    const voiceButton = $('#btn-voice');
+    voiceButton.addEventListener('pointerdown', (e) => e.preventDefault());
+    voiceButton.addEventListener('click', () => {
+      if (voiceRecorder?.state === 'recording') voiceRecorder.stop();
+      else void startVoiceRecording();
+    });
     fileInput.addEventListener('change', async () => {
       const files = [...fileInput.files];
       fileInput.value = '';
@@ -815,7 +986,11 @@
     });
 
     window.addEventListener('hashchange', route);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) markRead(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      resync().catch(console.error);
+      S.refreshDirectory?.();
+    });
     window.addEventListener('online', () => { S.retry = 0; connect(); });
     // iOS/Android keyboard: size the app to the visual viewport so the composer stays visible.
     if (window.visualViewport) {

@@ -7,9 +7,10 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 
 - 1:1 chats and group chats, live over WebSocket
 - Upload JPEG, PNG, GIF, WebP, or BMP images in chat (10 MB per image), with blurred previews and downloads
+- Record, preview, and send voice notes (10 MB per note)
 - Emoji picker for inserting emojis into messages
 - Message options: reply, forward, copy, edit, reactions, and delete for you or (for your own messages) everyone
-- Signed-in user profiles are stored in `data/db.json`; online status updates live in chat and user search
+- Signed-in user profiles are stored in `data/db.json`; online status updates live and refreshes on reconnect or when returning to the app
 - Delivery/read receipts (✓ sent, ✓✓ delivered, animated eye when read), typing indicator, online / last seen, unread badges
 - Mobile-first UI: list ↔ conversation slide navigation with the back button, safe-area insets, on-screen-keyboard aware, dark mode
 - Installable PWA (Add to Home Screen), offline app shell, browser notifications
@@ -67,11 +68,11 @@ data/secret.key      cookie-signing secret (or set SESSION_SECRET)
 
 - Session cookie is signed, `HttpOnly`, `SameSite=Lax` (`Secure` + `__Host-` prefix on HTTPS). WebSocket upgrades and state-changing requests check the `Origin` header. Strict CSP, all user text is rendered with `textContent` (no HTML injection). Message size and per-connection rate are limited.
 - Every signed-in user can search the directory of other signed-in users by name to start chats. Restrict who can sign in with `ALLOWED_EMAIL_DOMAINS`.
-- Image uploads are limited to 10 MB each, validated by file signature, stored under `data/uploads/`, and available only to members of their chat.
+- Image uploads and voice notes are limited to 10 MB each, validated by file signature, stored under `data/uploads/`, and available only to members of their chat.
 - Messages are stored unencrypted on the server (no end-to-end encryption).
 - **Never run with `DEV_LOGIN=1` on a public server.**
 
 ## Known limits / next steps
 
 - Storage is a single JSON file in memory: fine for a team or demo, not for many thousands of users or multiple server instances. Swap `db` for SQLite/Postgres and add Redis pub/sub to scale out.
-- Not included yet: inline image previews, voice notes, group admin (rename/add/remove members), push notifications while the app is closed (needs Web Push + VAPID keys), session revocation list.
+- Not included yet: group admin (rename/add/remove members), push notifications while the app is closed (needs Web Push + VAPID keys), session revocation list.
