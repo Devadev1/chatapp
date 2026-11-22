@@ -17,15 +17,12 @@
       <p>Sign in to start chatting.</p>
       <div id="error" class="err" hidden></div>
       <a id="sso" class="btn" href="/auth/login" hidden>Continue with SSO</a>
-      <div id="no-sso" class="warn" hidden>SSO isn't configured on this server yet. Set <code>OIDC_CLIENT_ID</code> and friends (see README).</div>
       <div id="dev" hidden>
         <div class="or">Demo login (local testing)</div>
         <form method="post" action="/auth/dev">
           <input name="name" placeholder="Your name" required maxlength="60" autocomplete="name">
-          <input name="email" type="email" placeholder="you@example.com" required autocomplete="email">
           <button class="btn" type="submit">Continue</button>
         </form>
-        <div class="warn">Demo login is on: anyone can sign in as any email. Turn it off in production (<code>DEV_LOGIN=0</code>).</div>
       </div>
     </div>
   </div>

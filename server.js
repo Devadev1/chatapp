@@ -162,14 +162,9 @@ function sendTo(userId, obj, except) {
   const data = JSON.stringify(obj);
   for (const w of set) if (w !== except) w.send(data);
 }
-function contactIds(userId) {
-  const s = new Set();
-  for (const c of Object.values(db.chats)) if (c.members.includes(userId)) for (const m of c.members) if (m !== userId) s.add(m);
-  return s;
-}
 function broadcastPresence(u) {
   const ev = { t: 'presence', userId: u.id, online: isOnline(u.id), lastSeen: u.lastSeen || null };
-  for (const id of contactIds(u.id)) sendTo(id, ev);
+  for (const id of conns.keys()) if (id !== u.id) sendTo(id, ev);
 }
 
 // ───────────────────────────── receipts ─────────────────────────────
@@ -317,6 +312,19 @@ function upsertUser({ key, name, email, picture }) {
   save();
   return u;
 }
+function upsertDemoUser(name) {
+  const key = `dev|${name.toLowerCase()}`;
+  let existing = userByKey.get(key);
+  if (!existing) {
+    existing = Object.values(db.users).find((u) => u.key?.startsWith('dev|') && u.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      userByKey.delete(existing.key);
+      existing.key = key;
+      userByKey.set(key, existing);
+    }
+  }
+  return upsertUser({ key, name, email: existing?.email || null, picture: existing?.picture || null });
+}
 function startSession(res, user) {
   setCookie(res, SID, sign({ uid: user.id, exp: now() + SESSION_TTL }), SESSION_TTL / 1000);
 }
@@ -383,9 +391,8 @@ async function authRoutes(req, res, url) {
     if (!sameOrigin(req)) return json(res, 403, { error: 'bad origin' });
     const f = new URLSearchParams((await readBody(req)).toString('utf8'));
     const name = String(f.get('name') || '').trim().slice(0, 60);
-    const email = String(f.get('email') || '').trim().toLowerCase();
-    if (!name || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return redirect(res, '/login?error=' + encodeURIComponent('Enter a name and a valid email.'));
-    const user = upsertUser({ key: `dev|${email}`, name, email, picture: null });
+    if (!name) return redirect(res, '/login?error=' + encodeURIComponent('Enter your name.'));
+    const user = upsertDemoUser(name);
     startSession(res, user);
     return redirect(res, '/');
   }
@@ -407,7 +414,7 @@ async function apiRoutes(req, res, url, user) {
   if (req.method === 'GET' && p === '/api/users') {
     const q = (url.searchParams.get('q') || '').trim().toLowerCase();
     const users = Object.values(db.users)
-      .filter((u) => u.id !== user.id && (!q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)))
+      .filter((u) => u.id !== user.id && (!q || u.name.toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q)))
       .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 50).map(pub);
     return json(res, 200, { users });
   }
@@ -634,5 +641,5 @@ server.listen(PORT, () => {
   } else {
     console.log('SSO: not configured (set OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_ISSUER — see README).');
   }
-  if (DEV_LOGIN) console.warn('WARNING: demo login is ENABLED — anyone can sign in as any email. For local testing only.');
+  if (DEV_LOGIN) console.warn('WARNING: demo login is ENABLED — anyone can sign in as any name. For local testing only.');
 });

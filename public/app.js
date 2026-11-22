@@ -18,6 +18,7 @@
   const S = {
     me: null, chats: new Map(), msgs: new Map(), more: new Map(), active: null,
     typing: new Map(), outbox: [], ws: null, wsOpen: false, retry: 0, reconnectTimer: null, gotReady: false, filter: '',
+    directory: new Map(), renderDirectory: null,
   };
 
   /* ───────── api ───────── */
@@ -334,6 +335,11 @@
   }
   function onPresence({ userId, online, lastSeen }) {
     for (const c of S.chats.values()) for (const mem of c.members) if (mem.id === userId) { mem.online = online; mem.lastSeen = lastSeen; }
+    const user = S.directory.get(userId);
+    if (user) {
+      user.online = online; user.lastSeen = lastSeen;
+      S.renderDirectory?.();
+    }
     renderList(); if (S.active) renderHeader();
   }
 
@@ -373,7 +379,10 @@
   function openNewChat() {
     const modal = $('#modal');
     let mode = 'pick', users = [], selected = new Map(), q = '', closed = false, seq = 0;
-    const close = () => { closed = true; clearTimeout(draw.t); modal.hidden = true; modal.replaceChildren(); };
+    const close = () => {
+      closed = true; clearTimeout(draw.t); S.renderDirectory = null; S.directory.clear();
+      modal.hidden = true; modal.replaceChildren();
+    };
     modal.onclick = (e) => { if (e.target === modal) close(); };
 
     async function fetchUsers() {
@@ -382,12 +391,13 @@
       try { res = (await api(`/api/users?q=${encodeURIComponent(q)}`)).users; } catch { res = []; }
       if (closed || mine !== seq) return;
       users = res;
+      S.directory = new Map(users.map((u) => [u.id, u]));
       draw();
     }
     async function startDirect(u) {
       try {
         const { chat } = await api('/api/chats', { method: 'POST', body: { type: 'direct', userId: u.id } });
-        S.chats.set(chat.id, S.chats.get(chat.id) || chat);
+        S.chats.set(chat.id, chat);
         close(); go(chat.id);
       } catch (e) { toast(e.message); }
     }
@@ -397,16 +407,20 @@
         S.chats.set(chat.id, chat); close(); go(chat.id);
       } catch (e) { toast(e.message); }
     }
-    const row = (u, onclick, withCheck) => el('div', { class: 'item', onclick },
-      avatar(u, 'sm'),
-      el('div', {}, el('div', { class: 'name', text: u.name }), el('div', { class: 'email', text: u.email })),
-      withCheck ? el('div', { class: 'check' + (selected.has(u.id) ? ' on' : ''), text: selected.has(u.id) ? '✓' : '' }) : null);
+    const row = (u, onclick, withCheck) => {
+      const av = avatar(u, 'sm');
+      if (u.online) av.append(el('span', { class: 'dot' }));
+      return el('div', { class: 'item', onclick },
+        av,
+        el('div', { class: 'name', text: u.name }),
+        withCheck ? el('div', { class: 'check' + (selected.has(u.id) ? ' on' : ''), text: selected.has(u.id) ? '✓' : '' }) : null);
+    };
 
     function draw() {
       const keepFocus = document.activeElement?.id === 'u-search';
       const title = mode === 'pick' ? 'New chat' : 'New group';
       const search = el('div', { class: 'pad' }, el('input', {
-        id: 'u-search', type: 'search', placeholder: 'Search people by name or email', value: q, autocomplete: 'off',
+        id: 'u-search', type: 'search', placeholder: 'Search people by name', value: q, autocomplete: 'off',
         oninput: (e) => { q = e.target.value; clearTimeout(draw.t); draw.t = setTimeout(fetchUsers, 200); },
       }));
       const body = el('div', { class: 'body' });
@@ -438,6 +452,7 @@
       if (keepFocus || !draw.shown) { const i = $('#u-search'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); draw.shown = true; }
     }
     draw.shown = false;
+    S.renderDirectory = draw;
     fetchUsers();
   }
 
@@ -501,8 +516,7 @@
     S.me = user;
     const me = avatar(user); me.id = 'me'; me.classList.add('sm');
     $('#me').replaceWith(me);
-    $('#menu-who').textContent = `${user.name}\n${user.email}`;
-    $('#menu-who').style.whiteSpace = 'pre-line';
+    $('#menu-who').textContent = user.name;
     bindUI();
     await loadChats();
     await route();

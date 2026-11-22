@@ -7,7 +7,6 @@
     $('sso').hidden = !c.sso;
     if (c.sso) $('sso').textContent = `Continue with ${c.providerName}`;
     $('dev').hidden = !c.dev;
-    $('no-sso').hidden = c.sso;
   } catch {
     $('error').textContent = 'Cannot reach the server.';
     $('error').hidden = false;

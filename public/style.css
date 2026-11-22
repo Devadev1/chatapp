@@ -161,5 +161,4 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .login-card form { display: grid; gap: 10px; text-align: left; margin-top: 18px; }
 .login-card input { width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 16px; background: var(--bar); color: var(--text); }
 .login-card .or { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; text-transform: uppercase; letter-spacing: .06em; }
-.login-card .warn { background: #fff4d6; color: #6a4b00; border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-top: 12px; text-align: left; }
 .login-card .err { background: #fde8ec; color: #9b1030; border-radius: 8px; padding: 9px 12px; margin-bottom: 14px; font-size: 14px; }

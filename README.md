@@ -6,6 +6,7 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 ## Features
 
 - 1:1 chats and group chats, live over WebSocket
+- Signed-in user profiles are stored in `data/db.json`; online status updates live in chat and user search
 - Delivery/read receipts (✓ sent, ✓✓ delivered, blue ✓✓ read), typing indicator, online / last seen, unread badges
 - Mobile-first UI: list ↔ conversation slide navigation with the back button, safe-area insets, on-screen-keyboard aware, dark mode
 - Installable PWA (Add to Home Screen), offline app shell, browser notifications
@@ -18,9 +19,9 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 node server.js            # http://localhost:3000
 ```
 
-With no SSO configured, a **demo login** (any name + email) appears so you can try the app locally. It is disabled automatically as soon as `OIDC_CLIENT_ID` is set.
+With no SSO configured, a **demo login** (name only) appears so you can try the app locally. Demo names identify accounts, so use a distinct name per person. It is disabled automatically as soon as `OIDC_CLIENT_ID` is set.
 
-Try it with two browsers (or one normal + one private window) signed in as different emails.
+Try it with two browsers (or one normal + one private window) signed in with different names.
 
 ## Configure SSO
 
@@ -61,7 +62,7 @@ data/secret.key      cookie-signing secret (or set SESSION_SECRET)
 ## Security notes
 
 - Session cookie is signed, `HttpOnly`, `SameSite=Lax` (`Secure` + `__Host-` prefix on HTTPS). WebSocket upgrades and state-changing requests check the `Origin` header. Strict CSP, all user text is rendered with `textContent` (no HTML injection). Message size and per-connection rate are limited.
-- Every signed-in user can search the directory of other signed-in users (name + email) to start chats. Restrict who can sign in with `ALLOWED_EMAIL_DOMAINS`.
+- Every signed-in user can search the directory of other signed-in users by name to start chats. Restrict who can sign in with `ALLOWED_EMAIL_DOMAINS`.
 - Messages are stored unencrypted on the server (no end-to-end encryption).
 - **Never run with `DEV_LOGIN=1` on a public server.**
 
