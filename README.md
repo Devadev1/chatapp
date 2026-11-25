@@ -14,7 +14,7 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 - Message options: reply, forward, copy, edit, reactions, and delete for you or (for your own messages) everyone
 - Signed-in user profiles are stored in `data/db.json`; online status updates live and refreshes on reconnect or when returning to the app
 - Delivery/read receipts (✓ sent, ✓✓ delivered, animated eye when read), typing indicator, online / last seen, unread badges
-- Responsive charcoal-and-teal UI with a compact Chats / Call history rail; each selection opens its own app view, with mobile-safe chat navigation
+- Responsive charcoal-and-teal UI with separate Chats and Call history views; desktop uses a side rail and mobile uses a fixed, equal-width bottom tab bar
 - Installable PWA (Add to Home Screen), offline app shell, browser notifications
 - Auto-reconnect with resend of unsent messages (idempotent, no duplicates)
 - SSO via any OIDC provider (Google, Microsoft Entra ID, Okta, Auth0, Keycloak, …): authorization-code flow + PKCE, `state`/`nonce`, ID-token signature verification (RS/PS/ES), optional email-domain allow-list

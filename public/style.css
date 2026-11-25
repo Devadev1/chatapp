@@ -24,15 +24,30 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 @media (max-width: 799px) {
   #app { grid-template-columns: 1fr; }
-  #sidebar, #conv { position: absolute; inset: 0; transition: transform .25s ease; }
+  #sidebar, #conv { position: absolute; inset: 0 0 calc(64px + env(safe-area-inset-bottom)) 0; transition: transform .25s ease; }
+  #sidebar { grid-template-columns: 1fr; }
+  #sidebar .view-rail { display: none; }
+  #sidebar .sidebar-main { grid-column: 1; }
   #conv { transform: translateX(100%); z-index: 2; }
   body.chat-open #conv { transform: none; }
   body.chat-open #sidebar { transform: translateX(-25%); }
   #placeholder { display: none !important; }
-  body.calls-open #sidebar { inset: 0 auto 0 0; width: 64px; grid-template-columns: 64px minmax(0, 1fr); transform: none; z-index: 3; }
-  body.calls-open #sidebar .sidebar-main { display: none; }
-  body.calls-open #conv { inset: 0 0 0 64px; transform: none; z-index: 2; }
+  body.calls-open #sidebar { display: none; }
+  body.calls-open #conv { inset: 0 0 calc(64px + env(safe-area-inset-bottom)) 0; transform: none; z-index: 2; }
+  .mobile-tabs {
+    position: absolute; z-index: 12; right: 0; bottom: 0; left: 0; display: grid; height: calc(64px + env(safe-area-inset-bottom));
+    grid-template-columns: repeat(2, minmax(0, 1fr)); padding-bottom: env(safe-area-inset-bottom);
+    border-top: 1px solid var(--border); background: #101617;
+  }
+  .mobile-tab-button {
+    position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0;
+    border: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600;
+  }
+  .mobile-tab-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .mobile-tab-button.active { background: #19332c; color: var(--accent); }
+  .mobile-tab-button.active::before { position: absolute; top: -1px; right: 20%; left: 20%; height: 2px; background: var(--accent); content: ""; }
 }
+@media (min-width: 800px) { .mobile-tabs { display: none; } }
 @media (min-width: 800px) { #btn-back { display: none; } }
 @media (min-width: 800px) {
   #conv { overflow: hidden; }

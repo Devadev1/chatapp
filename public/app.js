@@ -233,11 +233,14 @@
     S.filter = '';
     $('#filter').value = '';
     $('#call-filter').value = '';
-    const chats = $('#nav-chats'), calls = $('#nav-calls');
-    chats.classList.toggle('active', view === 'chats');
-    calls.classList.toggle('active', view === 'calls');
-    if (view === 'chats') chats.setAttribute('aria-current', 'page'); else chats.removeAttribute('aria-current');
-    if (view === 'calls') calls.setAttribute('aria-current', 'page'); else calls.removeAttribute('aria-current');
+    for (const chats of [$('#nav-chats'), $('#mobile-nav-chats')]) {
+      chats.classList.toggle('active', view === 'chats');
+      if (view === 'chats') chats.setAttribute('aria-current', 'page'); else chats.removeAttribute('aria-current');
+    }
+    for (const calls of [$('#nav-calls'), $('#mobile-nav-calls')]) {
+      calls.classList.toggle('active', view === 'calls');
+      if (view === 'calls') calls.setAttribute('aria-current', 'page'); else calls.removeAttribute('aria-current');
+    }
     $('#sidebar-title').textContent = 'Chats';
     document.body.classList.toggle('calls-open', view === 'calls');
     document.body.classList.remove('chat-open');
@@ -1276,6 +1279,8 @@
     $('#call-filter').oninput = (e) => { S.filter = e.target.value; renderCallHistory(); };
     $('#nav-chats').onclick = () => setSidebarView('chats');
     $('#nav-calls').onclick = () => setSidebarView('calls');
+    $('#mobile-nav-chats').onclick = () => setSidebarView('chats');
+    $('#mobile-nav-calls').onclick = () => setSidebarView('calls');
     const menu = $('#menu');
     $('#btn-menu').onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; };
     document.addEventListener('click', () => (menu.hidden = true));
