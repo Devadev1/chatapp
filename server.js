@@ -3,7 +3,7 @@
  * ChatApp server — zero dependencies (Node 18+).
  *  - OpenID Connect (SSO) login: authorization-code flow + PKCE, ID-token signature verification
  *  - Signed, HttpOnly session cookies
- *  - Hand-rolled RFC 6455 WebSocket for real-time messaging, receipts, typing, presence
+ *  - Hand-rolled RFC 6455 WebSocket for messaging, presence, and WebRTC call signaling
  *  - JSON-file persistence (swap for a real DB before scaling out)
  */
 const http = require('node:http');
@@ -37,6 +37,25 @@ const VOICE_NOTE_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/mp4']);
 const REACTION_EMOJIS = new Set(['👍', '❤️', '😂', '😮', '😢', '🙏']);
 const MAX_WS_PAYLOAD = 64 * 1024;
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
+const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+let RTC_ICE_SERVERS;
+try {
+  const configured = process.env.RTC_ICE_SERVERS;
+  const iceServers = configured ? JSON.parse(configured) : DEFAULT_ICE_SERVERS;
+  if (!Array.isArray(iceServers) || !iceServers.length || iceServers.some((server) => {
+    const urls = server && server.urls;
+    const list = Array.isArray(urls) ? urls : [urls];
+    const validUrls = list.length > 0 && list.every((url) => typeof url === 'string' && /^(stuns?|turns?):/i.test(url));
+    return !server || typeof server !== 'object' || !validUrls
+      || (server.username != null && typeof server.username !== 'string')
+      || (server.credential != null && typeof server.credential !== 'string');
+  })) throw new Error('expected an array of ICE servers with valid urls');
+  RTC_ICE_SERVERS = iceServers.map(({ urls, username, credential }) => ({
+    urls, ...(username == null ? {} : { username }), ...(credential == null ? {} : { credential }),
+  }));
+} catch (e) {
+  throw new Error(`Invalid RTC_ICE_SERVERS: ${e.message}`);
+}
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -466,6 +485,7 @@ async function apiRoutes(req, res, url, user) {
   if (req.method !== 'GET' && !sameOrigin(req)) return json(res, 403, { error: 'bad origin' });
 
   if (req.method === 'GET' && p === '/api/me') return json(res, 200, { user: pub(user) });
+  if (req.method === 'GET' && p === '/api/rtc-config') return json(res, 200, { iceServers: RTC_ICE_SERVERS });
 
   if (req.method === 'GET' && p === '/api/users') {
     const q = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -816,6 +836,9 @@ class WS {
 }
 
 const allSockets = new Set();
+const activeCalls = new Map();
+const CALL_RING_MS = 45_000;
+const CALL_ID_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 server.on('upgrade', (req, socket) => {
   const deny = (code, msg) => { socket.write(`HTTP/1.1 ${code} ${msg}\r\nConnection: close\r\n\r\n`); socket.destroy(); };
   try {
@@ -831,6 +854,111 @@ server.on('upgrade', (req, socket) => {
     onConnect(user, new WS(socket));
   } catch (e) { console.error(e); socket.destroy(); }
 });
+
+function notifyCall(userId, call, action, fromId, extra = {}) {
+  sendTo(userId, { t: 'call', action, callId: call.id, chatId: call.chatId, from: fromId, ...extra });
+}
+function notifyCallSocket(ws, call, action, fromId, extra = {}) {
+  if (ws && !ws.closed) ws.send(JSON.stringify({ t: 'call', action, callId: call.id, chatId: call.chatId, from: fromId, ...extra }));
+}
+function callError(ws, callId, error) {
+  ws.send(JSON.stringify({ t: 'call', action: 'error', callId, error }));
+}
+function endCall(call, action, fromId, extra = {}) {
+  clearTimeout(call.timer);
+  activeCalls.delete(call.id);
+  for (const id of [call.callerId, call.calleeId]) notifyCall(id, call, action, fromId, extra);
+}
+function activeCallFor(userId) {
+  return [...activeCalls.values()].find((call) => call.callerId === userId || call.calleeId === userId);
+}
+function handleCallMessage(user, ws, m) {
+  if (typeof m.callId !== 'string' || !CALL_ID_RE.test(m.callId)) {
+    return callError(ws, null, 'invalid call id');
+  }
+  if (m.action === 'invite') {
+    const chat = db.chats[m.chatId];
+    if (!chat || chat.type !== 'direct' || chat.members.length !== 2 || !chat.members.includes(user.id)) {
+      return callError(ws, m.callId, 'voice calls require a direct chat');
+    }
+    const calleeId = chat.members.find((id) => id !== user.id);
+    if (activeCalls.has(m.callId)) return callError(ws, m.callId, 'call id already in use');
+    if (activeCallFor(user.id) || activeCallFor(calleeId)) {
+      return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'busy', calleeId);
+    }
+    if (!isOnline(calleeId)) return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'unavailable', calleeId);
+    const call = { id: m.callId, chatId: chat.id, callerId: user.id, calleeId, callerWs: ws, status: 'ringing', timer: null };
+    call.timer = setTimeout(() => {
+      if (activeCalls.get(call.id) !== call) return;
+      activeCalls.delete(call.id);
+      notifyCall(call.callerId, call, 'timeout', call.calleeId);
+      notifyCall(call.calleeId, call, 'missed', call.callerId);
+    }, CALL_RING_MS);
+    activeCalls.set(call.id, call);
+    sendTo(calleeId, { t: 'chat', chat: chatView(chat, calleeId) });
+    notifyCall(calleeId, call, 'incoming', user.id);
+    notifyCall(user.id, call, 'ringing', user.id);
+    return;
+  }
+
+  const call = activeCalls.get(m.callId);
+  if (!call || ![call.callerId, call.calleeId].includes(user.id)) {
+    return callError(ws, m.callId, 'call not found');
+  }
+  const isCaller = user.id === call.callerId;
+  switch (m.action) {
+    case 'accept':
+      if (isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be answered');
+      call.status = 'connected'; call.calleeWs = ws; clearTimeout(call.timer);
+      notifyCallSocket(call.callerWs, call, 'accepted', user.id);
+      sendTo(user.id, { t: 'call', action: 'answered', callId: call.id, chatId: call.chatId, from: user.id }, ws);
+      return;
+    case 'reject':
+      if (isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be declined');
+      endCall(call, 'rejected', user.id);
+      return;
+    case 'cancel':
+      if (!isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be cancelled');
+      endCall(call, 'ended', user.id, { reason: 'cancelled' });
+      return;
+    case 'end':
+      endCall(call, 'ended', user.id, { reason: 'ended' });
+      return;
+    case 'signal': {
+      if (call.status !== 'connected') return callError(ws, m.callId, 'call is not connected');
+      if ((isCaller && ws !== call.callerWs) || (!isCaller && ws !== call.calleeWs)) {
+        return callError(ws, m.callId, 'call signaling must use the active call connection');
+      }
+      let payload;
+      if (m.kind === 'offer' || m.kind === 'answer') {
+        if ((m.kind === 'offer' && !isCaller) || (m.kind === 'answer' && isCaller)
+          || !m.description || m.description.type !== m.kind
+          || typeof m.description.sdp !== 'string' || m.description.sdp.length > 16_000) {
+          return callError(ws, m.callId, 'invalid call description');
+        }
+        payload = { description: { type: m.kind, sdp: m.description.sdp } };
+      } else if (m.kind === 'ice') {
+        const c = m.candidate;
+        if (!c || typeof c !== 'object' || typeof c.candidate !== 'string' || c.candidate.length > 2048
+          || (c.sdpMid != null && (typeof c.sdpMid !== 'string' || c.sdpMid.length > 256))
+          || (c.sdpMLineIndex != null && (!Number.isInteger(c.sdpMLineIndex) || c.sdpMLineIndex < 0 || c.sdpMLineIndex > 65535))
+          || (c.usernameFragment != null && (typeof c.usernameFragment !== 'string' || c.usernameFragment.length > 256))) {
+          return callError(ws, m.callId, 'invalid ICE candidate');
+        }
+        payload = { candidate: {
+          candidate: c.candidate,
+          ...(c.sdpMid == null ? {} : { sdpMid: c.sdpMid }),
+          ...(c.sdpMLineIndex == null ? {} : { sdpMLineIndex: c.sdpMLineIndex }),
+          ...(c.usernameFragment == null ? {} : { usernameFragment: c.usernameFragment }),
+        } };
+      } else return callError(ws, m.callId, 'unsupported call signal');
+      notifyCallSocket(isCaller ? call.calleeWs : call.callerWs, call, m.kind, user.id, payload);
+      return;
+    }
+    default:
+      return callError(ws, m.callId, 'unsupported call action');
+  }
+}
 
 function onConnect(user, ws) {
   allSockets.add(ws);
@@ -859,15 +987,23 @@ function onConnect(user, ws) {
         if (chat && chat.members.includes(user.id)) for (const id of chat.members) if (id !== user.id) sendTo(id, { t: 'typing', chatId: chat.id, userId: user.id });
         return;
       }
+      case 'call': return handleCallMessage(user, ws, m);
       default:
     }
   };
   ws.onclose = () => {
+    for (const call of [...activeCalls.values()]) {
+      if (call.callerWs === ws || call.calleeWs === ws) endCall(call, 'ended', user.id, { reason: 'connection-lost' });
+    }
     allSockets.delete(ws);
     const set = conns.get(user.id);
     set?.delete(ws);
     if (set && set.size === 0) {
       conns.delete(user.id);
+      for (const call of [...activeCalls.values()]) {
+        if (call.callerId !== user.id && call.calleeId !== user.id) continue;
+        endCall(call, 'ended', user.id, { reason: 'connection-lost' });
+      }
       user.lastSeen = now(); save();
       broadcastPresence(user);
     }

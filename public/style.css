@@ -236,7 +236,65 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .primary { background: var(--accent); color: #fff; border: 0; border-radius: 22px; padding: 10px 20px; font-weight: 600; }
 .primary:disabled { opacity: .5; }
 .sheet .foot { padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); display: flex; gap: 8px; flex-direction: column; }
-.toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: #202c33; color: #fff; padding: 10px 16px; border-radius: 10px; z-index: 60; max-width: 90vw; }
+.toast { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: #202c33; color: #fff; padding: 10px 16px; border-radius: 10px; z-index: 80; max-width: 90vw; }
+.call-header-button:disabled { opacity: .5; cursor: default; }
+.call-header-button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-dark); }
+.call-overlay {
+  position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 24px;
+  background: radial-gradient(ellipse at 50% 25%, rgba(0, 168, 132, .18), transparent 58%), rgba(5, 14, 18, .78);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.call-dialog {
+  position: relative; isolation: isolate; display: flex; width: min(440px, 100%); min-height: 510px; flex-direction: column;
+  align-items: center; justify-content: center; overflow: hidden; padding: 32px 28px 30px;
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent); border-radius: 30px;
+  background: linear-gradient(155deg, color-mix(in srgb, var(--panel) 92%, var(--accent)), var(--panel) 62%);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .42); text-align: center;
+  animation: call-enter .32s cubic-bezier(.2, .8, .2, 1) both;
+}
+.call-dialog::before { position: absolute; z-index: -1; top: -130px; left: 50%; width: 340px; height: 260px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 12%, transparent); content: ""; filter: blur(55px); transform: translateX(-50%); }
+.call-eyebrow { display: inline-flex; align-items: center; gap: 9px; min-height: 30px; padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--text) 8%, transparent); border-radius: 18px; background: color-mix(in srgb, var(--panel) 72%, transparent); color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .14em; }
+.call-live-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.incoming-call .call-live-dot, .outgoing-call .call-live-dot { animation: call-dot-pulse 1.5s ease-in-out infinite; }
+.call-avatar-wrap { position: relative; display: grid; width: 154px; height: 154px; flex: none; place-items: center; margin: 25px 0 14px; }
+.call-avatar-wrap::before, .call-avatar-wrap::after { position: absolute; inset: 7px; border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); border-radius: 50%; content: ""; }
+.incoming-call .call-avatar-wrap::before, .outgoing-call .call-avatar-wrap::before { animation: call-ring 2.4s ease-out infinite; }
+.incoming-call .call-avatar-wrap::after, .outgoing-call .call-avatar-wrap::after { animation: call-ring 2.4s ease-out 1.2s infinite; }
+.call-avatar { width: 112px; height: 112px; border: 4px solid color-mix(in srgb, var(--panel) 90%, transparent); border-radius: 50%; box-shadow: 0 10px 34px rgba(0, 0, 0, .22); font-size: 34px; }
+.call-person h2 { margin: 0; font-size: clamp(24px, 6vw, 30px); font-weight: 650; letter-spacing: -.025em; }
+.call-person p { min-height: 23px; margin: 8px 0 0; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.call-controls { display: flex; align-items: flex-start; justify-content: center; gap: clamp(25px, 8vw, 44px); margin-top: 35px; }
+.call-control { display: flex; min-width: 64px; flex-direction: column; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; color: var(--muted); }
+.call-control-button { display: grid; width: 62px; height: 62px; place-items: center; border: 1px solid color-mix(in srgb, var(--text) 8%, transparent); border-radius: 50%; background: color-mix(in srgb, var(--text) 6%, var(--panel)); color: var(--text); box-shadow: 0 4px 12px rgba(0, 0, 0, .09); transition: transform .18s ease, box-shadow .18s ease, background .18s ease; }
+.call-control:hover .call-control-button { box-shadow: 0 8px 20px rgba(0, 0, 0, .16); transform: translateY(-2px); }
+.call-control:active .call-control-button { transform: scale(.94); }
+.call-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 18px; }
+.call-control-label { color: var(--muted); font-size: 12px; font-weight: 550; white-space: nowrap; }
+.call-control.answer .call-control-button { border-color: transparent; background: var(--accent); color: #fff; }
+.call-control.hangup .call-control-button { border-color: transparent; background: var(--danger); color: #fff; }
+.call-control .phone-icon { transform: rotate(135deg); }
+.call-control.speaker-toggle[aria-pressed=false] .call-control-button, .call-control.muted-toggle[aria-pressed=true] .call-control-button { border-color: color-mix(in srgb, var(--danger) 25%, transparent); background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--danger); }
+.call-control-icon { display: block; }
+.call-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.call-hint { margin: 23px 0 0; color: var(--muted); font-size: 12px; }
+@keyframes call-enter { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes call-ring { 0% { opacity: .72; transform: scale(.72); } 100% { opacity: 0; transform: scale(1.35); } }
+@keyframes call-dot-pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 8%, transparent); } }
+@media (max-width: 600px) {
+  .call-overlay { padding: 0; background: radial-gradient(ellipse at 50% 26%, rgba(0, 168, 132, .2), transparent 55%), #101b20; }
+  .call-dialog { width: 100%; min-height: 100%; padding: calc(34px + env(safe-area-inset-top)) 24px calc(28px + env(safe-area-inset-bottom)); border: 0; border-radius: 0; background: linear-gradient(160deg, color-mix(in srgb, var(--panel) 88%, var(--accent)), var(--panel) 70%); }
+  .call-avatar-wrap { width: 176px; height: 176px; margin: 34px 0 19px; }
+  .call-avatar-wrap::before, .call-avatar-wrap::after { inset: 3px; }
+  .call-avatar { width: 128px; height: 128px; font-size: 39px; }
+  .call-controls { gap: clamp(32px, 11vw, 52px); margin-top: 56px; }
+  .call-control-button { width: 68px; height: 68px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .call-dialog, .incoming-call .call-live-dot, .outgoing-call .call-live-dot,
+  .incoming-call .call-avatar-wrap::before, .incoming-call .call-avatar-wrap::after,
+  .outgoing-call .call-avatar-wrap::before, .outgoing-call .call-avatar-wrap::after { animation: none; }
+  .call-control-button { transition: none; }
+}
 
 /* ---------- login ---------- */
 .login-page { min-height: 100dvh; display: grid; place-items: center; background: linear-gradient(180deg, var(--accent-dark) 0 220px, var(--bg) 220px); padding: 20px; overflow: auto; }

@@ -6,6 +6,7 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 ## Features
 
 - 1:1 chats and group chats, live over WebSocket
+- 1:1 browser-to-browser voice calls with incoming-call, mute, and hang-up controls
 - Upload JPEG, PNG, GIF, WebP, or BMP images in chat (10 MB per image), with blurred previews and downloads
 - Record, preview, and send voice notes (10 MB per note)
 - Emoji picker for inserting emojis into messages
@@ -71,8 +72,11 @@ data/secret.key      cookie-signing secret (or set SESSION_SECRET)
 - Image uploads and voice notes are limited to 10 MB each, validated by file signature, stored under `data/uploads/`, and available only to members of their chat.
 - Messages are stored unencrypted on the server (no end-to-end encryption).
 - **Never run with `DEV_LOGIN=1` on a public server.**
+- Voice-call signaling is authenticated and limited to direct-chat members. Call audio is exchanged by WebRTC between browsers and is not recorded or stored by ChatApp. Microphone access requires HTTPS (except on `localhost`).
 
 ## Known limits / next steps
 
+- Voice calls use a public STUN server by default. Some NATs and firewalls require a TURN relay; configure `RTC_ICE_SERVERS` with your own STUN/TURN server list for those networks. TURN credentials are delivered to signed-in browsers and should be short-lived or scoped.
+- Active call signaling is held in memory and requires both users to connect to the same server instance.
 - Storage is a single JSON file in memory: fine for a team or demo, not for many thousands of users or multiple server instances. Swap `db` for SQLite/Postgres and add Redis pub/sub to scale out.
 - Not included yet: group admin (rename/add/remove members), push notifications while the app is closed (needs Web Push + VAPID keys), session revocation list.
