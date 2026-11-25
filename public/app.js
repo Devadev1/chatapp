@@ -33,6 +33,7 @@
     me: null, chats: new Map(), msgs: new Map(), more: new Map(), active: null,
     typing: new Map(), outbox: [], ws: null, wsOpen: false, retry: 0, reconnectTimer: null, gotReady: false, filter: '',
     directory: new Map(), renderDirectory: null, refreshDirectory: null, animatedReads: new WeakSet(), replyTo: null, call: null, iceServers: [],
+    sidebarView: 'chats', callHistory: [],
   };
   let voiceRecorder = null, voiceStream = null, voiceChunks = [], voiceBlob = null, voiceUrl = null;
   let voiceTimer = null, voiceStartedAt = 0, voiceSize = 0, discardVoiceRecording = false;
@@ -140,7 +141,7 @@
     const chats = [...S.chats.values()]
       .filter((c) => !q || chatName(c).toLowerCase().includes(q))
       .sort((a, b) => (b.last?.ts || b.createdAt) - (a.last?.ts || a.createdAt));
-    const box = $('#chatlist'); box.replaceChildren();
+    const box = $('#chatlist'), empty = $('#list-empty'); box.replaceChildren(empty);
     for (const c of chats) {
       const who = chatAvatarUser(c);
       const av = avatar(who);
@@ -165,9 +166,86 @@
             c.unread ? el('div', { class: 'badge', text: c.unread > 99 ? '99+' : String(c.unread) }) : null)));
       box.append(item);
     }
-    $('#list-empty').hidden = S.chats.size > 0;
+    $('#chatlist').hidden = S.sidebarView !== 'chats';
+    $('#call-history-view').hidden = S.sidebarView !== 'calls';
+    $('#list-empty').hidden = S.sidebarView !== 'chats' || chats.length > 0;
+    $('#calls-empty').hidden = S.sidebarView !== 'calls' || S.callHistory.length > 0;
+    $('#filter').placeholder = 'Search chats';
+    $('#filter').setAttribute('aria-label', 'Search chats');
+    if (S.sidebarView === 'calls') renderCallHistory();
     const total = [...S.chats.values()].reduce((n, c) => n + c.unread, 0);
     document.title = total ? `(${total}) ChatApp` : 'ChatApp';
+  }
+  function callResultText(call) {
+    if (call.result === 'completed') return call.direction === 'outgoing' ? 'Outgoing call' : 'Incoming call';
+    if (call.result === 'missed') return 'Missed call';
+    if (call.result === 'declined') return 'Declined';
+    if (call.result === 'cancelled') return 'Cancelled';
+    if (call.result === 'no-answer') return 'No answer';
+    if (call.result === 'unavailable') return 'Unavailable';
+    if (call.result === 'busy') return 'Busy';
+    return 'Call failed';
+  }
+  function callDurationText(durationMs) {
+    if (!durationMs) return '';
+    const seconds = Math.floor(durationMs / 1000);
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+  function renderCallHistory() {
+    const box = $('#call-list'), empty = $('#calls-empty'), query = S.filter.trim().toLowerCase();
+    const calls = S.callHistory.filter((call) => {
+      const peerName = (call.peer && call.peer.name || 'Unknown').toLowerCase();
+      return !query || peerName.includes(query) || callResultText(call).toLowerCase().includes(query);
+    });
+    box.replaceChildren(empty);
+    for (const call of calls) {
+      const missed = call.result === 'missed' || call.result === 'no-answer' || call.result === 'unavailable';
+      const peer = call.peer || { id: call.peerId, name: 'Unknown' };
+      const time = listTime(call.endedAt || call.startedAt);
+      const duration = callDurationText(call.durationMs);
+      const detail = `${callResultText(call)}${duration ? ` · ${duration}` : ''}`;
+      const item = el('div', { class: 'call-history-item', role: 'listitem' },
+        el('button', { class: 'call-history-info', type: 'button', onclick: () => { setSidebarView('chats'); go(call.chatId); } },
+          el('span', { class: `call-history-direction${missed ? ' missed' : ''}`, 'aria-hidden': 'true', text: call.direction === 'incoming' ? '↙' : '↗' }),
+          avatar(peer, 'call-history-avatar'),
+          el('span', { class: 'call-history-copy' },
+            el('span', { class: 'call-history-name', text: peer.name }),
+            el('span', { class: `call-history-result${missed ? ' missed' : ''}`, text: detail })),
+          el('span', { class: 'call-history-time', text: time })),
+        el('button', {
+          class: 'call-redial icon-btn', type: 'button', 'aria-label': `Call ${peer.name}`, title: `Call ${peer.name}`,
+          onclick: () => startVoiceCall(call.chatId),
+        }, callIcon('phone', 'answer')));
+      box.append(item);
+    }
+    $('#calls-empty').hidden = S.sidebarView !== 'calls' || calls.length > 0;
+    if (S.sidebarView === 'calls' && calls.length === 0) {
+      $('#calls-empty').textContent = query ? 'No matching calls.' : 'Your call history will appear here.';
+    }
+  }
+  async function loadCallHistory() {
+    const { calls } = await api('/api/call-history');
+    S.callHistory = calls;
+    renderList();
+  }
+  function setSidebarView(view) {
+    S.sidebarView = view;
+    S.filter = '';
+    $('#filter').value = '';
+    $('#call-filter').value = '';
+    const chats = $('#nav-chats'), calls = $('#nav-calls');
+    chats.classList.toggle('active', view === 'chats');
+    calls.classList.toggle('active', view === 'calls');
+    if (view === 'chats') chats.setAttribute('aria-current', 'page'); else chats.removeAttribute('aria-current');
+    if (view === 'calls') calls.setAttribute('aria-current', 'page'); else calls.removeAttribute('aria-current');
+    $('#sidebar-title').textContent = 'Chats';
+    document.body.classList.toggle('calls-open', view === 'calls');
+    document.body.classList.remove('chat-open');
+    $('#call-history-view').hidden = view !== 'calls';
+    $('#thread').hidden = view === 'calls' || !S.active;
+    $('#placeholder').hidden = view === 'calls' || Boolean(S.active);
+    renderList();
+    if (view === 'calls') loadCallHistory().catch((e) => toast(e.message));
   }
 
   /* ───────── rendering: thread ───────── */
@@ -318,10 +396,11 @@
     S.active = null;
     clearReplyTarget();
     document.body.classList.remove('chat-open');
-    $('#thread').hidden = true; $('#placeholder').hidden = false;
+    $('#thread').hidden = true; $('#placeholder').hidden = S.sidebarView === 'calls';
     renderList();
   }
   async function openChat(id) {
+    if (S.sidebarView !== 'chats') setSidebarView('chats');
     if (S.active && S.active !== id && (voiceRecorder || voiceBlob)) discardVoiceNote();
     if (S.replyTo && S.replyTo.chatId !== id) clearReplyTarget();
     S.active = id;
@@ -400,6 +479,9 @@
       case 'presence': onPresence(m); break;
       case 'chat': S.chats.set(m.chat.id, m.chat); renderList(); break;
       case 'call': onCallEvent(m); break;
+      case 'call-history-updated':
+        if (S.sidebarView === 'calls') loadCallHistory().catch((e) => toast(e.message));
+        break;
       case 'error': {
         const arr = S.msgs.get(S.active) || [];
         const p = arr.find((x) => x.cid === m.cid);
@@ -561,7 +643,15 @@
       if (S.call !== call) return;
       if (pc.connectionState === 'connected') {
         clearTimeout(call.connectionTimer);
-        call.status = 'active'; call.startedAt = Date.now();
+        if (!call.startedAt) {
+          call.startedAt = Date.now();
+          if (!wsSend({ t: 'call', action: 'connected', callId: call.callId })) {
+            toast('Call signaling disconnected');
+            finishVoiceCall('end', false);
+            return;
+          }
+        }
+        call.status = 'active';
         renderCallOverlay(); if (S.active) renderHeader();
       } else if (pc.connectionState === 'disconnected') {
         clearTimeout(call.connectionTimer);
@@ -676,14 +766,15 @@
       });
     }
   }
-  function startVoiceCall() {
-    const chat = S.chats.get(S.active);
+  function startVoiceCall(chatId = S.active) {
+    const chat = S.chats.get(chatId);
     if (!chat || chat.type !== 'direct' || S.call) return;
     if (!window.isSecureContext || !window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) {
       toast('Voice calling needs a supported browser and a secure connection (HTTPS or localhost)');
       return;
     }
     if (!S.wsOpen) { toast('Connect to chat before starting a call'); return; }
+    if (chat.id !== S.active) go(chat.id);
     const peer = otherOf(chat);
     const call = {
       callId: callUuid(), chatId: chat.id, peerId: peer.id, role: 'caller',
@@ -1180,8 +1271,11 @@
   function bindUI() {
     $('#btn-new').onclick = openNewChat;
     $('#btn-back').onclick = () => go('');
-    $('#btn-call').onclick = startVoiceCall;
+    $('#btn-call').onclick = () => startVoiceCall();
     $('#filter').oninput = (e) => { S.filter = e.target.value; renderList(); };
+    $('#call-filter').oninput = (e) => { S.filter = e.target.value; renderCallHistory(); };
+    $('#nav-chats').onclick = () => setSidebarView('chats');
+    $('#nav-calls').onclick = () => setSidebarView('calls');
     const menu = $('#menu');
     $('#btn-menu').onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; };
     document.addEventListener('click', () => (menu.hidden = true));

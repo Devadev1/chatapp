@@ -7,13 +7,14 @@ A WhatsApp-style real-time web chat that works on phones and desktops, with SSO 
 
 - 1:1 chats and group chats, live over WebSocket
 - 1:1 browser-to-browser voice calls with incoming-call, mute, and hang-up controls
+- Per-user call history in the sidebar with missed-call details and one-tap redial
 - Upload JPEG, PNG, GIF, WebP, or BMP images in chat (10 MB per image), with blurred previews and downloads
 - Record, preview, and send voice notes (10 MB per note)
 - Emoji picker for inserting emojis into messages
 - Message options: reply, forward, copy, edit, reactions, and delete for you or (for your own messages) everyone
 - Signed-in user profiles are stored in `data/db.json`; online status updates live and refreshes on reconnect or when returning to the app
 - Delivery/read receipts (✓ sent, ✓✓ delivered, animated eye when read), typing indicator, online / last seen, unread badges
-- Mobile-first UI: list ↔ conversation slide navigation with the back button, safe-area insets, on-screen-keyboard aware, dark mode
+- Responsive charcoal-and-teal UI with a compact Chats / Call history rail; each selection opens its own app view, with mobile-safe chat navigation
 - Installable PWA (Add to Home Screen), offline app shell, browser notifications
 - Auto-reconnect with resend of unsent messages (idempotent, no duplicates)
 - SSO via any OIDC provider (Google, Microsoft Entra ID, Okta, Auth0, Keycloak, …): authorization-code flow + PKCE, `state`/`nonce`, ID-token signature verification (RS/PS/ES), optional email-domain allow-list
@@ -60,7 +61,7 @@ Then open the URL on the phone and use *Share → Add to Home Screen* (iOS) or *
 ```
 server.js            HTTP API, OIDC, WebSocket, storage
 public/              index.html, app.js, style.css, login.*, sw.js, manifest, icons
-data/db.json         users, chats, messages (created on first run)
+data/db.json         users, chats, messages, call history (created on first run)
 data/uploads/        uploaded chat attachments (created on startup)
 data/secret.key      cookie-signing secret (or set SESSION_SECRET)
 ```
@@ -78,5 +79,6 @@ data/secret.key      cookie-signing secret (or set SESSION_SECRET)
 
 - Voice calls use a public STUN server by default. Some NATs and firewalls require a TURN relay; configure `RTC_ICE_SERVERS` with your own STUN/TURN server list for those networks. TURN credentials are delivered to signed-in browsers and should be short-lived or scoped.
 - Active call signaling is held in memory and requires both users to connect to the same server instance.
+- Call history is stored per user in `data/db.json`, limited to the latest 200 entries per user, and includes call result and connected duration; audio is never recorded.
 - Storage is a single JSON file in memory: fine for a team or demo, not for many thousands of users or multiple server instances. Swap `db` for SQLite/Postgres and add Redis pub/sub to scale out.
 - Not included yet: group admin (rename/add/remove members), push notifications while the app is closed (needs Web Push + VAPID keys), session revocation list.

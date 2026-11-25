@@ -1,5 +1,5 @@
 /* Network-first service worker: app shell works offline, API/WebSocket/auth are never cached. */
-const CACHE = 'chatapp-v6';
+const CACHE = 'chatapp-v10';
 const SHELL = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon.svg'];
 
 self.addEventListener('install', (e) => {

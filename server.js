@@ -167,8 +167,9 @@ function sameOrigin(req) {
 
 // ───────────────────────────── storage ─────────────────────────────
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-let db = { users: {}, chats: {}, messages: {} };
+let db = { users: {}, chats: {}, messages: {}, callHistory: {} };
 try { db = { ...db, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; } catch { /* first run */ }
+db.callHistory ||= {};
 
 const userByKey = new Map(Object.values(db.users).map((u) => [u.key, u]));
 const directIndex = new Map();
@@ -486,6 +487,13 @@ async function apiRoutes(req, res, url, user) {
 
   if (req.method === 'GET' && p === '/api/me') return json(res, 200, { user: pub(user) });
   if (req.method === 'GET' && p === '/api/rtc-config') return json(res, 200, { iceServers: RTC_ICE_SERVERS });
+  if (req.method === 'GET' && p === '/api/call-history') {
+    const calls = (db.callHistory[user.id] || []).slice(0, 100).map((call) => ({
+      ...call,
+      peer: db.users[call.peerId] ? pub(db.users[call.peerId]) : { id: call.peerId, name: 'Unknown', online: false, lastSeen: null },
+    }));
+    return json(res, 200, { calls });
+  }
 
   if (req.method === 'GET' && p === '/api/users') {
     const q = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -839,6 +847,7 @@ const allSockets = new Set();
 const activeCalls = new Map();
 const CALL_RING_MS = 45_000;
 const CALL_ID_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
+const CALL_HISTORY_LIMIT = 200;
 server.on('upgrade', (req, socket) => {
   const deny = (code, msg) => { socket.write(`HTTP/1.1 ${code} ${msg}\r\nConnection: close\r\n\r\n`); socket.destroy(); };
   try {
@@ -864,9 +873,34 @@ function notifyCallSocket(ws, call, action, fromId, extra = {}) {
 function callError(ws, callId, error) {
   ws.send(JSON.stringify({ t: 'call', action: 'error', callId, error }));
 }
+function recordCallHistory(call, results, endedAt = now()) {
+  for (const [userId, result] of Object.entries(results)) {
+    if (!db.users[userId]) continue;
+    const history = db.callHistory[userId] ||= [];
+    if (history.some((entry) => entry.id === call.id)) continue;
+    history.unshift({
+      id: call.id, chatId: call.chatId,
+      peerId: userId === call.callerId ? call.calleeId : call.callerId,
+      direction: userId === call.callerId ? 'outgoing' : 'incoming',
+      result, startedAt: call.startedAt, endedAt,
+      durationMs: call.connectedAt ? Math.max(0, endedAt - call.connectedAt) : 0,
+    });
+    if (history.length > CALL_HISTORY_LIMIT) history.length = CALL_HISTORY_LIMIT;
+    sendTo(userId, { t: 'call-history-updated' });
+  }
+  save();
+}
 function endCall(call, action, fromId, extra = {}) {
   clearTimeout(call.timer);
   activeCalls.delete(call.id);
+  const results = call.connectedAt
+    ? { [call.callerId]: 'completed', [call.calleeId]: 'completed' }
+    : action === 'rejected'
+      ? { [call.callerId]: 'declined', [call.calleeId]: 'declined' }
+      : extra.reason === 'cancelled'
+        ? { [call.callerId]: 'cancelled', [call.calleeId]: 'cancelled' }
+        : { [call.callerId]: 'failed', [call.calleeId]: 'failed' };
+  recordCallHistory(call, results);
   for (const id of [call.callerId, call.calleeId]) notifyCall(id, call, action, fromId, extra);
 }
 function activeCallFor(userId) {
@@ -883,14 +917,24 @@ function handleCallMessage(user, ws, m) {
     }
     const calleeId = chat.members.find((id) => id !== user.id);
     if (activeCalls.has(m.callId)) return callError(ws, m.callId, 'call id already in use');
-    if (activeCallFor(user.id) || activeCallFor(calleeId)) {
+    const occupied = activeCallFor(user.id) || activeCallFor(calleeId);
+    if (occupied) {
+      recordCallHistory({
+        id: m.callId, chatId: chat.id, callerId: user.id, calleeId, startedAt: now(),
+      }, { [user.id]: 'busy' });
       return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'busy', calleeId);
     }
-    if (!isOnline(calleeId)) return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'unavailable', calleeId);
-    const call = { id: m.callId, chatId: chat.id, callerId: user.id, calleeId, callerWs: ws, status: 'ringing', timer: null };
+    if (!isOnline(calleeId)) {
+      recordCallHistory({
+        id: m.callId, chatId: chat.id, callerId: user.id, calleeId, startedAt: now(),
+      }, { [user.id]: 'unavailable', [calleeId]: 'missed' });
+      return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'unavailable', calleeId);
+    }
+    const call = { id: m.callId, chatId: chat.id, callerId: user.id, calleeId, callerWs: ws, status: 'ringing', startedAt: now(), timer: null };
     call.timer = setTimeout(() => {
       if (activeCalls.get(call.id) !== call) return;
       activeCalls.delete(call.id);
+      recordCallHistory(call, { [call.callerId]: 'no-answer', [call.calleeId]: 'missed' });
       notifyCall(call.callerId, call, 'timeout', call.calleeId);
       notifyCall(call.calleeId, call, 'missed', call.callerId);
     }, CALL_RING_MS);
@@ -923,6 +967,12 @@ function handleCallMessage(user, ws, m) {
       return;
     case 'end':
       endCall(call, 'ended', user.id, { reason: 'ended' });
+      return;
+    case 'connected':
+      if (call.status !== 'connected' || (isCaller ? ws !== call.callerWs : ws !== call.calleeWs)) {
+        return callError(ws, m.callId, 'call is not connected');
+      }
+      call.connectedAt ||= now();
       return;
     case 'signal': {
       if (call.status !== 'connected') return callError(ws, m.callId, 'call is not connected');
