@@ -29,7 +29,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   #sidebar .view-rail { display: none; }
   #sidebar .sidebar-main { grid-column: 1; }
   #conv { transform: translateX(100%); z-index: 2; }
-  body.chat-open #conv { transform: none; }
+  body.chat-open #conv { inset: 0; transform: none; }
   body.chat-open #sidebar { transform: translateX(-25%); }
   #placeholder { display: none !important; }
   body.calls-open #sidebar { display: none; }
@@ -39,6 +39,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
     grid-template-columns: repeat(2, minmax(0, 1fr)); padding-bottom: env(safe-area-inset-bottom);
     border-top: 1px solid var(--border); background: #101617;
   }
+  body.chat-open .mobile-tabs { display: none; }
   .mobile-tab-button {
     position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0;
     border: 0; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600;
