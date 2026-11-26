@@ -26,8 +26,11 @@
   const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp']);
   const VOICE_TYPES = new Set(['audio/webm', 'audio/ogg', 'audio/mp4']);
   const VOICE_MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  const VOICE_WAVEFORM = [18, 30, 48, 34, 65, 42, 78, 52, 33, 60, 86, 46, 28, 57, 72, 39, 61, 90, 45, 31, 68, 51, 82, 38, 58, 74, 43, 62, 35, 77, 49, 26];
   const MIC_ICON = '<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2Z"/></svg>';
   const STOP_ICON = '<span class="voice-stop-icon" aria-hidden="true">■</span>';
+  const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  const PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zm6 0h4v14h-4z"/></svg>';
 
   const S = {
     me: null, chats: new Map(), msgs: new Map(), more: new Map(), active: null,
@@ -191,30 +194,97 @@
     const seconds = Math.floor(durationMs / 1000);
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   }
+  function callHistoryTitle(call) {
+    if (!call.groupCall) return call.title || call.peer?.name || 'Unknown';
+    const participants = (call.participants || [])
+      .filter((person) => person.id !== S.me.id)
+      .map((person) => person.name)
+      .filter(Boolean);
+    return participants.length ? participants.join('; ') : call.title || call.peer?.name || 'Unknown';
+  }
+  function groupCallHistoryIcon() {
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('aria-hidden', 'true');
+    const shape = (name, attrs) => {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+      for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+      return node;
+    };
+    icon.append(
+      shape('circle', { cx: '9', cy: '8', r: '3' }),
+      shape('circle', { cx: '17', cy: '9', r: '2.5' }),
+      shape('path', { d: 'M3.5 19c.4-3.1 2.3-5 5.5-5h1c3.2 0 5.1 1.9 5.5 5' }),
+      shape('path', { d: 'M15 14.5c2.7.1 4.4 1.6 4.8 4.5' }),
+    );
+    return el('span', { class: 'call-history-avatar call-history-group-icon', 'aria-hidden': 'true' }, icon);
+  }
+  function audioTimeText(seconds) {
+    const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+  }
+  function createVoicePlayer(src, label) {
+    const audio = el('audio', { class: 'voice-player-audio', preload: 'metadata', src, 'aria-hidden': 'true' });
+    const currentTime = el('span', { class: 'voice-time', text: '0:00' });
+    const duration = el('span', { class: 'voice-time', text: '0:00' });
+    const waveform = el('span', { class: 'voice-waveform', 'aria-hidden': 'true' });
+    const bars = VOICE_WAVEFORM.map((height, index) => el('span', {
+      class: 'voice-wave-bar', style: `--wave-height:${height}%;--bar-index:${index}`,
+    }));
+    waveform.append(...bars);
+    const playButton = el('button', {
+      class: 'voice-play', type: 'button', 'aria-label': `Play ${label}`, title: `Play ${label}`,
+      onclick: () => {
+        if (audio.paused) audio.play().catch(() => toast(`${label} could not be played`));
+        else audio.pause();
+      },
+    });
+    const player = el('div', { class: 'voice-player' }, currentTime, waveform, duration, playButton, audio);
+    const update = () => {
+      const progress = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.currentTime / audio.duration : 0;
+      currentTime.textContent = audioTimeText(audio.currentTime);
+      duration.textContent = audioTimeText(audio.duration);
+      bars.forEach((bar, index) => bar.classList.toggle('played', (index + 0.5) / bars.length <= progress));
+      const playing = !audio.paused && !audio.ended;
+      player.classList.toggle('is-playing', playing);
+      playButton.innerHTML = playing ? PAUSE_ICON : PLAY_ICON;
+      playButton.setAttribute('aria-label', `${playing ? 'Pause' : 'Play'} ${label}`);
+      playButton.title = `${playing ? 'Pause' : 'Play'} ${label}`;
+    };
+    for (const event of ['loadedmetadata', 'durationchange', 'timeupdate', 'play', 'pause', 'ended']) {
+      audio.addEventListener(event, update);
+    }
+    update();
+    return player;
+  }
   function renderCallHistory() {
     const box = $('#call-list'), empty = $('#calls-empty'), query = S.filter.trim().toLowerCase();
     const calls = S.callHistory.filter((call) => {
-      const peerName = (call.peer && call.peer.name || 'Unknown').toLowerCase();
+      const peerName = callHistoryTitle(call).toLowerCase();
       return !query || peerName.includes(query) || callResultText(call).toLowerCase().includes(query);
     });
     box.replaceChildren(empty);
     for (const call of calls) {
       const missed = call.result === 'missed' || call.result === 'no-answer' || call.result === 'unavailable';
       const peer = call.peer || { id: call.peerId, name: 'Unknown' };
+      const title = callHistoryTitle(call);
       const time = listTime(call.endedAt || call.startedAt);
       const duration = callDurationText(call.durationMs);
       const detail = `${callResultText(call)}${duration ? ` · ${duration}` : ''}`;
       const item = el('div', { class: 'call-history-item', role: 'listitem' },
-        el('button', { class: 'call-history-info', type: 'button', onclick: () => { setSidebarView('chats'); go(call.chatId); } },
+        el('button', { class: 'call-history-info', type: 'button', onclick: () => {
+          if (S.chats.has(call.chatId)) { setSidebarView('chats'); go(call.chatId); }
+          else toast('This call is not linked to one of your chats');
+        } },
           el('span', { class: `call-history-direction${missed ? ' missed' : ''}`, 'aria-hidden': 'true', text: call.direction === 'incoming' ? '↙' : '↗' }),
-          avatar(peer, 'call-history-avatar'),
+          call.groupCall ? groupCallHistoryIcon() : avatar(peer, 'call-history-avatar'),
           el('span', { class: 'call-history-copy' },
-            el('span', { class: 'call-history-name', text: peer.name }),
+            el('span', { class: 'call-history-name', text: title }),
             el('span', { class: `call-history-result${missed ? ' missed' : ''}`, text: detail })),
           el('span', { class: 'call-history-time', text: time })),
         el('button', {
-          class: 'call-redial icon-btn', type: 'button', 'aria-label': `Call ${peer.name}`, title: `Call ${peer.name}`,
-          onclick: () => startVoiceCall(call.chatId),
+          class: 'call-redial icon-btn', type: 'button', 'aria-label': `Call ${title}`, title: `Call ${title}`,
+          disabled: !S.chats.has(call.chatId), onclick: () => startVoiceCall(call.chatId),
         }, callIcon('phone', 'answer')));
       box.append(item);
     }
@@ -266,10 +336,11 @@
     else { const o = otherOf(chat); status = o.online ? 'online' : lastSeenText(o.lastSeen); }
     $('#head-status').textContent = status;
     const callButton = $('#btn-call');
-    callButton.hidden = chat.type !== 'direct';
+    callButton.hidden = false;
     callButton.disabled = Boolean(S.call);
-    callButton.setAttribute('aria-label', S.call ? 'Voice call in progress' : 'Start voice call');
-    callButton.title = S.call ? 'Voice call in progress' : 'Start voice call';
+    const callLabel = chat.type === 'group' ? 'Start group voice call' : 'Start voice call';
+    callButton.setAttribute('aria-label', S.call ? 'Voice call in progress' : callLabel);
+    callButton.title = S.call ? 'Voice call in progress' : callLabel;
   }
 
   function renderMessages({ stick } = {}) {
@@ -303,10 +374,7 @@
       if (m.attachment) {
         const fileUrl = `/api/files/${encodeURIComponent(m.attachment.id)}`;
         if (m.attachment.voiceNote) {
-          const player = el('audio', {
-            class: 'voice-player', controls: true, preload: 'metadata',
-            src: `${fileUrl}?play=1`, 'aria-label': 'Voice note',
-          });
+          const player = createVoicePlayer(`${fileUrl}?play=1`, 'voice note');
           const download = el('a', {
             class: 'voice-download', href: `${fileUrl}?download=1`, download: m.attachment.name,
             'aria-label': 'Download voice note',
@@ -496,17 +564,40 @@
     }
   }
   function callStatusText(call) {
-    if (call.status === 'incoming') return 'Incoming voice call';
-    if (call.status === 'calling') return 'Calling…';
+    const connectedPeers = [...call.peerConnections.values()].filter((entry) => entry.pc.connectionState === 'connected').length;
+    if (call.status === 'incoming') return call.groupCall ? 'Incoming group voice call' : 'Incoming voice call';
+    if (call.status === 'calling') {
+      const invitees = [...call.participants.values()].filter((person) => person.id !== S.me.id);
+      if (invitees.some((person) => person.status === 'ringing')) return 'Calling…';
+      if (invitees.length && invitees.every((person) => person.status === 'unavailable')) return 'Contact is offline';
+      if (invitees.length && invitees.every((person) => person.status === 'busy')) return 'Contact is on another call';
+      if (invitees.length && invitees.every((person) => person.status === 'declined')) return 'Call declined';
+      if (invitees.length && invitees.every((person) => person.status === 'missed')) return 'No answer';
+      return 'Waiting for someone to join…';
+    }
     if (call.status === 'connecting') return 'Connecting your audio…';
     if (call.status === 'active') {
       const seconds = Math.floor((Date.now() - call.startedAt) / 1000);
-      return `Connected  ·  ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+      return `${connectedPeers + 1} connected  ·  ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     }
     return 'Voice call';
   }
+  function callParticipantStatus(status) {
+    return ({
+      connected: 'In call', ringing: 'Calling…', declined: 'Declined',
+      missed: 'No answer', busy: 'Busy', unavailable: 'Offline', left: 'Left',
+    })[status] || 'Invited';
+  }
+  function updateCallParticipants(call, message) {
+    if (Array.isArray(message.participants)) {
+      call.participants = new Map(message.participants.map((participant) => [participant.id, participant]));
+    }
+    if (typeof message.title === 'string') call.title = message.title;
+    if (typeof message.groupCall === 'boolean') call.groupCall = message.groupCall;
+  }
   function callIcon(name, variant) {
     const paths = {
+      add: ['M12 5v14m-7-7h14'],
       phone: ['M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.56 3.57.56.55 0 1 .45 1 1V20c0 .55-.45 1-1 1C10.61 21 3 13.39 3 4c0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.24.19 2.45.56 3.57a1 1 0 0 1-.25 1.02z'],
       mic: ['M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11z'],
       micOff: ['M12 14a3 3 0 0 0 3-3V8.83l-6-6A3 3 0 0 0 9 5v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-.22 1.47l1.57 1.57A7 7 0 0 0 19 11h-2zm-5 7a7 7 0 0 0 3.54-.96l1.46 1.46A8.95 8.95 0 0 1 13 19.93V22h-2v-2.07a8.97 8.97 0 0 1-6-8.48h2a7 7 0 0 0 5 6.55z', 'M3 3l18 18'],
@@ -543,25 +634,49 @@
     const overlay = $('#call-overlay'), call = S.call;
     clearInterval(callClock); callClock = null;
     if (!call) { overlay.hidden = true; overlay.replaceChildren(); return; }
+    for (const audio of call.remoteAudios?.values() || []) { audio.pause(); audio.srcObject = null; }
     overlay.hidden = false;
     overlay.classList.toggle('incoming-call', call.status === 'incoming');
     overlay.classList.toggle('live-call', call.status === 'active' || call.status === 'connecting');
     overlay.classList.toggle('outgoing-call', call.status === 'calling');
-    const chat = S.chats.get(call.chatId);
-    const peer = chat?.members.find((member) => member.id === call.peerId) || { id: call.peerId, name: 'Chat member' };
-    const audio = el('audio', { class: 'call-audio', autoplay: true, playsinline: true, 'aria-label': 'Call audio' });
-    if (call.remoteStream) audio.srcObject = call.remoteStream;
-    audio.volume = call.speakerOn === false ? 0 : 1;
-    call.remoteAudio = audio;
-    const callLabel = call.status === 'incoming' ? 'INCOMING CALL' : call.status === 'active' ? 'VOICE CALL' : 'OUTGOING CALL';
-    const avatarWrap = el('div', { class: 'call-avatar-wrap' }, avatar(peer, 'call-avatar'));
+    const participants = [...call.participants.values()];
+    const groupCall = call.groupCall || participants.length > 2;
+    const title = call.title || participants.find((person) => person.id !== S.me.id)?.name || 'Voice call';
+    const avatarPeople = participants.filter((person) => person.status !== 'left').slice(0, 4);
+    const avatarWrap = el('div', { class: `call-avatar-wrap${groupCall ? ' group-call-avatars' : ''}` });
+    if (groupCall) {
+      for (const person of avatarPeople) avatarWrap.append(avatar(person, 'call-avatar'));
+    } else {
+      avatarWrap.append(avatar(avatarPeople.find((person) => person.id !== S.me.id) || { id: 'call', name: title }, 'call-avatar'));
+    }
+    const callLabel = call.status === 'incoming'
+      ? groupCall ? 'INCOMING GROUP CALL' : 'INCOMING CALL'
+      : groupCall ? 'GROUP VOICE CALL' : 'VOICE CALL';
+    const remoteAudios = new Map(), audioNodes = [];
+    for (const [peerId, stream] of call.remoteStreams) {
+      const person = call.participants.get(peerId);
+      const audio = el('audio', {
+        class: 'call-audio', autoplay: true, playsinline: true,
+        'aria-label': `Call audio from ${person?.name || 'participant'}`,
+      });
+      audio.srcObject = stream;
+      audio.volume = call.speakerOn === false ? 0 : 1;
+      remoteAudios.set(peerId, audio); audioNodes.push(audio);
+    }
+    call.remoteAudios = remoteAudios;
     const dialog = el('section', { class: 'call-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'call-title' },
       el('div', { class: 'call-eyebrow' }, el('span', { class: 'call-live-dot' }), el('span', { text: callLabel })),
       avatarWrap,
       el('div', { class: 'call-person' },
-        el('h2', { id: 'call-title', text: peer.name }),
-        el('p', { id: 'call-status', 'aria-live': 'polite', text: callStatusText(call) })),
-      audio);
+        el('h2', { id: 'call-title', text: title }),
+        el('p', { id: 'call-status', 'aria-live': 'polite', text: callStatusText(call) })));
+    if (groupCall) {
+      dialog.append(el('div', { class: 'call-roster', 'aria-label': 'Call participants' },
+        ...participants.map((person) => el('div', { class: `call-roster-person ${person.status}` },
+          el('span', { class: 'call-roster-name', text: person.id === S.me.id ? 'You' : person.name }),
+          el('span', { class: 'call-roster-status', text: callParticipantStatus(person.status) })))));
+    }
+    dialog.append(...audioNodes);
     if (call.status === 'incoming') {
       dialog.append(el('div', { class: 'call-controls' },
         callControl('Decline', 'phone', 'hangup', declineVoiceCall),
@@ -569,12 +684,17 @@
     } else {
       const controls = el('div', { class: 'call-controls' });
       if (call.localStream) controls.append(callControl(call.muted ? 'Unmute' : 'Mute', call.muted ? 'micOff' : 'mic', call.muted ? 'muted-toggle' : 'toggle', toggleCallMute, call.muted));
-      if (call.status !== 'calling') controls.append(callControl(call.speakerOn === false ? 'Speaker off' : 'Speaker on', call.speakerOn === false ? 'speakerOff' : 'speaker', 'speaker-toggle', toggleCallSpeaker, call.speakerOn !== false));
-      controls.append(callControl(call.status === 'calling' ? 'Cancel call' : 'End call', 'phone', 'hangup', hangupVoiceCall));
+      controls.append(callControl(call.speakerOn === false ? 'Speaker off' : 'Speaker on', call.speakerOn === false ? 'speakerOff' : 'speaker', 'speaker-toggle', toggleCallSpeaker, call.speakerOn !== false));
+      const anotherParticipantAnswered = participants.some((person) => person.id !== S.me.id && person.status === 'connected');
+      if (anotherParticipantAnswered) {
+        controls.append(callControl('Add people', 'add', 'invite-toggle', () => openCallInvitePicker(S.chats.get(call.chatId), call)));
+      }
+      controls.append(callControl(call.role === 'host' ? 'End call' : 'Leave call', 'phone', 'hangup', hangupVoiceCall));
       dialog.append(controls);
       if (call.status === 'calling') dialog.append(el('p', { class: 'call-hint', text: 'You can keep chatting while you wait' }));
     }
     overlay.replaceChildren(dialog);
+    for (const audio of remoteAudios.values()) audio.play().catch(() => toast('Tap Speaker to enable call audio'));
     if (call.status === 'active') callClock = setInterval(() => {
       const status = $('#call-status');
       if (status && S.call === call) status.textContent = callStatusText(call);
@@ -586,17 +706,19 @@
     S.call = null;
     if (notifyServer && S.wsOpen) wsSend({ t: 'call', action, callId: call.callId });
     clearInterval(callClock); callClock = null;
-    clearTimeout(call.connectionTimer);
-    if (call.pc) { call.pc.ontrack = null; call.pc.close(); }
+    for (const timer of call.peerDisconnectTimers.values()) clearTimeout(timer);
+    for (const { pc } of call.peerConnections.values()) {
+      pc.ontrack = null; pc.onicecandidate = null; pc.onconnectionstatechange = null; pc.close();
+    }
     if (call.localStream) for (const track of call.localStream.getTracks()) track.stop();
-    if (call.remoteAudio) { call.remoteAudio.pause(); call.remoteAudio.srcObject = null; }
+    for (const audio of call.remoteAudios.values()) { audio.pause(); audio.srcObject = null; }
     renderCallOverlay();
     if (S.active) renderHeader();
   }
   function hangupVoiceCall() {
     const call = S.call;
     if (!call) return;
-    finishVoiceCall(call.role === 'caller' && call.status === 'calling' ? 'cancel' : 'end');
+    finishVoiceCall(call.role === 'host' ? call.status === 'calling' ? 'cancel' : 'end' : 'leave');
   }
   function declineVoiceCall() { finishVoiceCall('reject'); }
   function toggleCallMute() {
@@ -610,73 +732,103 @@
     const call = S.call;
     if (!call) return;
     call.speakerOn = call.speakerOn === false;
-    if (call.remoteAudio) {
-      call.remoteAudio.volume = call.speakerOn ? 1 : 0;
-      if (call.speakerOn) call.remoteAudio.play().catch(() => toast('Call audio could not be started'));
-    }
+    for (const audio of call.remoteAudios.values()) audio.volume = call.speakerOn ? 1 : 0;
     renderCallOverlay();
   }
-  async function prepareCallPeer(call) {
+  async function ensureLocalCallStream(call) {
     if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) throw new Error('Voice calling is not supported in this browser');
-    if (!call.localStream) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      if (S.call !== call) { for (const track of stream.getTracks()) track.stop(); return; }
-      call.localStream = stream;
+    if (call.localStream) return call.localStream;
+    if (!call.localStreamPromise) {
+      call.localStreamPromise = navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then((stream) => {
+        if (S.call !== call) { for (const track of stream.getTracks()) track.stop(); return null; }
+        call.localStream = stream;
+        for (const track of stream.getAudioTracks()) track.enabled = !call.muted;
+        renderCallOverlay();
+        return stream;
+      }).finally(() => { call.localStreamPromise = null; });
     }
-    if (call.pc) return;
-    const pc = new RTCPeerConnection({ iceServers: S.iceServers });
-    call.pc = pc;
-    for (const track of call.localStream.getTracks()) pc.addTrack(track, call.localStream);
-    pc.onicecandidate = (event) => {
-      if (event.candidate && S.call === call && !wsSend({
-        t: 'call', action: 'signal', callId: call.callId, kind: 'ice', candidate: event.candidate.toJSON(),
-      })) {
-        toast('Call signaling disconnected');
-        finishVoiceCall('end', false);
-      }
-    };
-    pc.ontrack = (event) => {
-      call.remoteStream = event.streams[0] || new MediaStream([event.track]);
-      if (call.remoteAudio) {
-        call.remoteAudio.srcObject = call.remoteStream;
-        call.remoteAudio.play().catch(() => toast('Tap Speaker to enable call audio'));
-      }
-    };
-    pc.onconnectionstatechange = () => {
-      if (S.call !== call) return;
-      if (pc.connectionState === 'connected') {
-        clearTimeout(call.connectionTimer);
-        if (!call.startedAt) {
-          call.startedAt = Date.now();
-          if (!wsSend({ t: 'call', action: 'connected', callId: call.callId })) {
-            toast('Call signaling disconnected');
-            finishVoiceCall('end', false);
-            return;
+    const stream = await call.localStreamPromise;
+    if (!stream && S.call === call) throw new Error('Could not access the microphone');
+    return stream;
+  }
+  async function prepareCallPeer(call, peerId) {
+    if (call.peerConnections.has(peerId)) return call.peerConnections.get(peerId);
+    if (call.peerPromises.has(peerId)) return call.peerPromises.get(peerId);
+    const setup = (async () => {
+      const stream = await ensureLocalCallStream(call);
+      if (!stream || S.call !== call) return null;
+      const pc = new RTCPeerConnection({ iceServers: S.iceServers });
+      const entry = { pc, pendingIce: [] };
+      call.peerConnections.set(peerId, entry);
+      for (const track of stream.getTracks()) pc.addTrack(track, stream);
+      pc.onicecandidate = (event) => {
+        if (event.candidate && S.call === call && !wsSend({
+          t: 'call', action: 'signal', callId: call.callId, to: peerId,
+          kind: 'ice', candidate: event.candidate.toJSON(),
+        })) toast('Call signaling disconnected');
+      };
+      pc.ontrack = (event) => {
+        if (S.call !== call) return;
+        call.remoteStreams.set(peerId, event.streams[0] || new MediaStream([event.track]));
+        renderCallOverlay();
+      };
+      pc.onconnectionstatechange = () => {
+        if (S.call !== call) return;
+        if (pc.connectionState === 'connected') {
+          clearTimeout(call.peerDisconnectTimers.get(peerId));
+          call.peerDisconnectTimers.delete(peerId);
+          call.startedAt ||= Date.now();
+          call.status = 'active';
+          if (!call.connectedNoticeSent) {
+            call.connectedNoticeSent = true;
+            if (!wsSend({ t: 'call', action: 'connected', callId: call.callId })) toast('Call signaling disconnected');
           }
+          renderCallOverlay();
+        } else if (pc.connectionState === 'disconnected') {
+          clearTimeout(call.peerDisconnectTimers.get(peerId));
+          call.peerDisconnectTimers.set(peerId, setTimeout(() => {
+            if (S.call === call && pc.connectionState === 'disconnected') {
+              toast('A participant connection was lost');
+              closeCallPeer(call, peerId);
+            }
+          }, 30_000));
+        } else if (pc.connectionState === 'failed') {
+          toast('Could not connect to a participant');
+          closeCallPeer(call, peerId);
         }
-        call.status = 'active';
-        renderCallOverlay(); if (S.active) renderHeader();
-      } else if (pc.connectionState === 'disconnected') {
-        clearTimeout(call.connectionTimer);
-        call.connectionTimer = setTimeout(() => {
-          if (S.call === call && pc.connectionState === 'disconnected') {
-            toast('Voice call connection was lost');
-            finishVoiceCall('end');
-          }
-        }, 30_000);
-      } else if (pc.connectionState === 'failed') {
-        toast('Could not establish the voice call');
-        finishVoiceCall('end');
+      };
+      renderCallOverlay();
+      return entry;
+    })();
+    call.peerPromises.set(peerId, setup);
+    try { return await setup; }
+    finally { call.peerPromises.delete(peerId); }
+  }
+  function closeCallPeer(call, peerId) {
+    const entry = call.peerConnections.get(peerId);
+    if (entry) {
+      call.peerConnections.delete(peerId);
+      entry.pc.ontrack = null; entry.pc.onicecandidate = null; entry.pc.onconnectionstatechange = null;
+      entry.pc.close();
+    }
+    clearTimeout(call.peerDisconnectTimers.get(peerId));
+    call.peerDisconnectTimers.delete(peerId);
+    call.remoteStreams.delete(peerId);
+    if (S.call === call) {
+      if (![...call.peerConnections.values()].some((peer) => peer.pc.connectionState === 'connected')) {
+        const others = [...call.participants.values()].filter((person) => person.id !== S.me.id
+          && (person.status === 'connected' || person.status === 'ringing'));
+        call.status = others.some((person) => person.status === 'ringing') || !others.length ? 'calling' : 'connecting';
       }
-    };
-    renderCallOverlay();
+      renderCallOverlay();
+    }
   }
   async function acceptVoiceCall() {
     const call = S.call;
     if (!call || call.status !== 'incoming') return;
     try {
       call.status = 'connecting'; renderCallOverlay();
-      await prepareCallPeer(call);
+      await ensureLocalCallStream(call);
       if (S.call !== call || !wsSend({ t: 'call', action: 'accept', callId: call.callId })) {
         if (S.call === call) throw new Error('Call signaling is unavailable');
         return;
@@ -690,101 +842,230 @@
       toast(e.message || 'Could not access the microphone');
     }
   }
-  async function sendCallOffer(call) {
-    await prepareCallPeer(call);
-    if (S.call !== call) return;
-    const offer = await call.pc.createOffer();
-    await call.pc.setLocalDescription(offer);
+  async function sendCallOffer(call, peerId) {
+    const peer = await prepareCallPeer(call, peerId);
+    if (!peer || S.call !== call) return;
+    const offer = await peer.pc.createOffer();
+    await peer.pc.setLocalDescription(offer);
     if (S.call === call && !wsSend({
-      t: 'call', action: 'signal', callId: call.callId, kind: 'offer', description: call.pc.localDescription,
+      t: 'call', action: 'signal', callId: call.callId, to: peerId,
+      kind: 'offer', description: peer.pc.localDescription,
     })) throw new Error('Call signaling is unavailable');
   }
   async function onCallSignal(call, message) {
-    if (!call.pc) return;
+    let peer = call.peerConnections.get(message.from);
+    if (!peer) peer = await prepareCallPeer(call, message.from);
+    if (!peer || S.call !== call) return;
     if (message.action === 'ice') {
-      if (!call.pc.remoteDescription) call.pendingIce.push(message.candidate);
-      else await call.pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+      if (!peer.pc.remoteDescription) peer.pendingIce.push(message.candidate);
+      else await peer.pc.addIceCandidate(new RTCIceCandidate(message.candidate));
       return;
     }
     if (message.action === 'offer') {
-      await call.pc.setRemoteDescription(new RTCSessionDescription(message.description));
-      for (const candidate of call.pendingIce.splice(0)) await call.pc.addIceCandidate(new RTCIceCandidate(candidate));
-      const answer = await call.pc.createAnswer();
-      await call.pc.setLocalDescription(answer);
+      await peer.pc.setRemoteDescription(new RTCSessionDescription(message.description));
+      for (const candidate of peer.pendingIce.splice(0)) await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      const answer = await peer.pc.createAnswer();
+      await peer.pc.setLocalDescription(answer);
       if (S.call === call && !wsSend({
-        t: 'call', action: 'signal', callId: call.callId, kind: 'answer', description: call.pc.localDescription,
+        t: 'call', action: 'signal', callId: call.callId, to: message.from,
+        kind: 'answer', description: peer.pc.localDescription,
       })) throw new Error('Call signaling is unavailable');
     } else if (message.action === 'answer') {
-      await call.pc.setRemoteDescription(new RTCSessionDescription(message.description));
-      for (const candidate of call.pendingIce.splice(0)) await call.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      await peer.pc.setRemoteDescription(new RTCSessionDescription(message.description));
+      for (const candidate of peer.pendingIce.splice(0)) await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
     }
   }
   function onCallEvent(message) {
     let call = S.call;
     if (message.action === 'answered') {
-      if (call?.callId === message.callId && call.role === 'callee') finishVoiceCall('', false);
+      if (call?.callId === message.callId && call.role === 'participant' && call.status === 'incoming') finishVoiceCall('', false);
       return;
     }
     if (message.action === 'incoming') {
-      const chat = S.chats.get(message.chatId);
-      if (call || !chat || chat.type !== 'direct' || !chat.members.some((member) => member.id === message.from)) {
+      if (call || !Array.isArray(message.participants) || !message.participants.some((person) => person.id === message.from)) {
         wsSend({ t: 'call', action: 'reject', callId: message.callId });
         return;
       }
       call = {
-        callId: message.callId, chatId: message.chatId, peerId: message.from, role: 'callee',
-        status: 'incoming', pendingIce: [], muted: false, speakerOn: true,
+        callId: message.callId, chatId: message.chatId, title: message.title, groupCall: message.groupCall,
+        role: 'participant', status: 'incoming', participants: new Map(), peerConnections: new Map(),
+        peerPromises: new Map(), peerDisconnectTimers: new Map(), remoteStreams: new Map(), remoteAudios: new Map(),
+        muted: false, speakerOn: true, startedAt: 0, connectedNoticeSent: false,
       };
+      updateCallParticipants(call, message);
       S.call = call; renderCallOverlay(); if (S.active) renderHeader();
       return;
     }
-    if (message.action === 'error' || message.action === 'busy' || message.action === 'unavailable'
-      || message.action === 'timeout' || message.action === 'missed' || message.action === 'rejected'
-      || message.action === 'ended') {
+    if (message.action === 'missed' || message.action === 'ended') {
       if (!call || call.callId !== message.callId) return;
-      const text = {
-        error: message.error || 'Call could not be completed',
-        busy: 'This person is on another call',
-        unavailable: 'This person is offline',
-        timeout: 'No answer',
-        missed: 'Missed voice call',
-        rejected: message.from === S.me.id ? '' : 'Call declined',
-        ended: message.from === S.me.id ? '' : message.reason === 'connection-lost' ? 'Call ended because the other person disconnected' : 'Call ended',
-      }[message.action];
+      const text = message.action === 'missed' ? 'Missed voice call'
+        : message.from === S.me.id ? ''
+          : message.reason === 'connection-lost' ? 'Call ended because the host disconnected' : 'Call ended';
       finishVoiceCall('', false);
       if (text) toast(text);
       return;
     }
     if (!call || call.callId !== message.callId) return;
-    if (message.action === 'ringing') {
-      call.status = 'calling'; renderCallOverlay();
-    } else if (message.action === 'accepted') {
-      call.status = 'connecting'; renderCallOverlay();
-      sendCallOffer(call).catch((e) => {
-        if (S.call === call) { toast(e.message || 'Could not start the voice call'); finishVoiceCall('end'); }
+    if (message.action === 'error') {
+      toast(message.error || 'Call could not be completed');
+      if (call.role === 'host' && !call.serverStarted) finishVoiceCall('', false);
+      return;
+    }
+    if (message.action === 'ringing' || message.action === 'participants-updated') {
+      updateCallParticipants(call, message);
+      if (message.action === 'ringing' && call.role === 'host') {
+        call.serverStarted = true;
+        call.status = 'calling';
+      }
+      renderCallOverlay();
+    } else if (message.action === 'joined') {
+      updateCallParticipants(call, message);
+      call.status = 'connecting';
+      renderCallOverlay();
+      ensureLocalCallStream(call).then(() => Promise.all(
+        [...call.participants.values()]
+          .filter((person) => person.id !== S.me.id && person.status === 'connected')
+          .map((person) => sendCallOffer(call, person.id)),
+      )).catch((e) => {
+        if (S.call === call) { toast(e.message || 'Could not join the voice call'); finishVoiceCall('leave'); }
       });
+    } else if (message.action === 'participant-joined') {
+      updateCallParticipants(call, message);
+      renderCallOverlay();
+    } else if (message.action === 'participant-left') {
+      updateCallParticipants(call, message);
+      closeCallPeer(call, message.from);
+      renderCallOverlay();
     } else if (['offer', 'answer', 'ice'].includes(message.action)) {
       onCallSignal(call, message).catch((e) => {
-        if (S.call === call) { toast(e.message || 'Call connection failed'); finishVoiceCall('end'); }
+        if (S.call === call) { toast(e.message || 'Call connection failed'); closeCallPeer(call, message.from); }
       });
     }
   }
-  function startVoiceCall(chatId = S.active) {
+  function openCallInvitePicker(chat = S.chats.get(S.active), call = S.call) {
+    const modal = $('#modal');
+    if (!call && !chat) return;
+    if (call && ![...call.participants.values()].some((person) => person.id !== S.me.id && person.status === 'connected')) {
+      toast('You can add people after someone answers');
+      return;
+    }
+    const activeCount = () => call
+      ? [...call.participants.values()].filter((person) => person.status === 'connected' || person.status === 'ringing').length
+      : 1;
+    if (activeCount() >= 4) { toast('This call already has 4 participants'); return; }
+    let users = [], query = '', closed = false, sequence = 0;
+    const selected = new Map();
+    modal.classList.add('call-invite-modal');
+    const close = () => {
+      closed = true; clearTimeout(draw.timer); modal.classList.remove('call-invite-modal');
+      modal.hidden = true; modal.replaceChildren();
+    };
+    modal.onclick = (event) => { if (event.target === modal) close(); };
+    async function fetchUsers() {
+      const request = ++sequence;
+      try { users = (await api(`/api/users?q=${encodeURIComponent(query)}`)).users; }
+      catch (error) {
+        if (!closed && request === sequence) { toast(error.message); users = []; }
+      }
+      if (!closed && request === sequence) draw();
+    }
+    function draw() {
+      const keepFocus = document.activeElement?.id === 'call-user-search';
+      const activeIds = new Set(call
+        ? [...call.participants.values()].filter((person) => person.status === 'connected' || person.status === 'ringing').map((person) => person.id)
+        : [S.me.id]);
+      const slots = Math.max(0, 4 - activeIds.size);
+      const body = el('div', { class: 'body call-invite-list' });
+      const available = users.filter((user) => !activeIds.has(user.id));
+      for (const user of available) {
+        const isSelected = selected.has(user.id);
+        const item = el('button', {
+          class: `item call-invite-option${isSelected ? ' selected' : ''}`, type: 'button',
+          'aria-pressed': String(isSelected),
+          onclick: () => {
+            if (selected.has(user.id)) selected.delete(user.id);
+            else if (selected.size < slots) selected.set(user.id, user);
+            else { toast(`Choose up to ${slots} people`); return; }
+            draw();
+          },
+        });
+        const userAvatar = avatar(user, 'sm');
+        if (user.online) userAvatar.append(el('span', { class: 'dot' }));
+        item.append(userAvatar,
+          el('span', { class: 'call-invite-copy' },
+            el('span', { class: 'name', text: user.name }),
+            el('span', { class: 'user-status', text: user.online ? 'Online' : lastSeenText(user.lastSeen) })),
+          el('span', { class: `check${isSelected ? ' on' : ''}`, text: isSelected ? '✓' : '' }));
+        body.append(item);
+      }
+      if (!available.length) body.append(el('div', { class: 'empty-note', text: query ? 'No matching contacts.' : 'No contacts available to invite.' }));
+      const title = call ? 'Add people to call' : chat.type === 'group' ? 'Start group call' : 'Add person to call';
+      const search = el('div', { class: 'pad' }, el('input', {
+        id: 'call-user-search', type: 'search', placeholder: 'Search contacts', value: query, autocomplete: 'off',
+        oninput: (event) => { query = event.target.value; clearTimeout(draw.timer); draw.timer = setTimeout(fetchUsers, 200); },
+      }));
+      const footer = el('div', { class: 'foot call-invite-footer' },
+        el('span', { class: 'sub', text: `${activeIds.size} of 4 participants · choose up to ${slots}` }),
+        el('button', {
+          class: 'primary', type: 'button', text: call ? `Invite (${selected.size})` : `Start call (${selected.size})`,
+          disabled: selected.size === 0,
+          onclick: () => {
+            const ids = [...selected.keys()];
+            if (call) {
+              if (S.call !== call || !wsSend({ t: 'call', action: 'add', callId: call.callId, participantIds: ids })) {
+                toast('Could not send call invites'); return;
+              }
+              close(); toast(`Inviting ${ids.length} ${ids.length === 1 ? 'person' : 'people'}`);
+            } else {
+              close(); startVoiceCall(chat.id, ids);
+            }
+          },
+        }));
+      const sheet = el('div', { class: 'sheet call-invite-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        el('div', { class: 'bar' },
+          el('div', { class: 'title grow', text: title }),
+          el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: close },
+            el('span', { text: '×', style: 'font-size:22px' }))),
+        search, body, footer);
+      modal.replaceChildren(sheet); modal.hidden = false;
+      if (!draw.shown || keepFocus) {
+        const input = $('#call-user-search');
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+        draw.shown = true;
+      }
+    }
+    draw.shown = false;
+    draw();
+    fetchUsers();
+  }
+  function startVoiceCall(chatId = S.active, participantIds = null) {
     const chat = S.chats.get(chatId);
-    if (!chat || chat.type !== 'direct' || S.call) return;
+    if (!chat || S.call) return;
+    if (chat.type === 'group' && !participantIds) { openCallInvitePicker(chat, null); return; }
+    if (!participantIds) participantIds = [otherOf(chat).id];
+    if (!participantIds.length || participantIds.length > 3) { toast('Choose up to 3 people to start a call'); return; }
     if (!window.isSecureContext || !window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) {
       toast('Voice calling needs a supported browser and a secure connection (HTTPS or localhost)');
       return;
     }
     if (!S.wsOpen) { toast('Connect to chat before starting a call'); return; }
     if (chat.id !== S.active) go(chat.id);
-    const peer = otherOf(chat);
+    const participants = new Map([[S.me.id, { id: S.me.id, name: S.me.name, status: 'connected' }]]);
+    for (const id of participantIds) {
+      const person = chat.members.find((member) => member.id === id) || S.directory.get(id) || { id, name: 'Contact' };
+      participants.set(id, { ...person, status: 'ringing' });
+    }
     const call = {
-      callId: callUuid(), chatId: chat.id, peerId: peer.id, role: 'caller',
-      status: 'calling', pendingIce: [], muted: false, speakerOn: true,
+      callId: callUuid(), chatId: chat.id,
+      title: chat.type === 'group' ? chat.name : participantIds.length > 1 ? 'Group call' : participants.get(participantIds[0]).name,
+      groupCall: chat.type === 'group' || participantIds.length > 1, role: 'host', status: 'calling',
+      participants, peerConnections: new Map(), peerPromises: new Map(), peerDisconnectTimers: new Map(),
+      remoteStreams: new Map(), remoteAudios: new Map(), muted: false, speakerOn: true,
+      startedAt: 0, connectedNoticeSent: false, serverStarted: false,
     };
     S.call = call; renderCallOverlay(); renderHeader();
-    if (!wsSend({ t: 'call', action: 'invite', callId: call.callId, chatId: call.chatId })) {
+    if (!wsSend({ t: 'call', action: 'invite', callId: call.callId, chatId: call.chatId, participantIds })) {
       finishVoiceCall('', false); toast('Could not start the voice call');
     }
   }
@@ -1151,7 +1432,7 @@
           return;
         }
         voiceUrl = URL.createObjectURL(voiceBlob);
-        const audio = el('audio', { class: 'voice-player', controls: true, preload: 'metadata', src: voiceUrl, 'aria-label': 'Voice note preview' });
+        const audio = createVoicePlayer(voiceUrl, 'voice note preview');
         const send = el('button', { class: 'action-button primary-action', type: 'button', text: 'Send', onclick: () => sendVoiceNote(send) });
         const actions = el('div', { class: 'voice-draft-actions' },
           el('button', { class: 'action-button', type: 'button', text: 'Cancel', onclick: discardVoiceNote }),

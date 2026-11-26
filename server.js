@@ -491,6 +491,7 @@ async function apiRoutes(req, res, url, user) {
     const calls = (db.callHistory[user.id] || []).slice(0, 100).map((call) => ({
       ...call,
       peer: db.users[call.peerId] ? pub(db.users[call.peerId]) : { id: call.peerId, name: 'Unknown', online: false, lastSeen: null },
+      participants: (call.participantIds || [call.peerId]).map((id) => db.users[id] ? pub(db.users[id]) : { id, name: 'Unknown', online: false, lastSeen: null }),
     }));
     return json(res, 200, { calls });
   }
@@ -846,6 +847,7 @@ class WS {
 const allSockets = new Set();
 const activeCalls = new Map();
 const CALL_RING_MS = 45_000;
+const CALL_MAX_PARTICIPANTS = 4;
 const CALL_ID_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const CALL_HISTORY_LIMIT = 200;
 server.on('upgrade', (req, socket) => {
@@ -865,25 +867,66 @@ server.on('upgrade', (req, socket) => {
 });
 
 function notifyCall(userId, call, action, fromId, extra = {}) {
-  sendTo(userId, { t: 'call', action, callId: call.id, chatId: call.chatId, from: fromId, ...extra });
+  sendTo(userId, callEvent(userId, call, action, fromId, extra));
 }
-function notifyCallSocket(ws, call, action, fromId, extra = {}) {
-  if (ws && !ws.closed) ws.send(JSON.stringify({ t: 'call', action, callId: call.id, chatId: call.chatId, from: fromId, ...extra }));
+function notifyCallSocket(ws, call, action, fromId, extra = {}, userId = fromId) {
+  if (ws && !ws.closed) ws.send(JSON.stringify(callEvent(userId, call, action, fromId, extra)));
+}
+function callEvent(userId, call, action, fromId, extra = {}) {
+  return {
+    t: 'call', action, callId: call.id, chatId: call.chatId,
+    title: callTitle(call, userId), groupCall: call.chatType === 'group' || call.participants.size > 2,
+    from: fromId, participants: callParticipantViews(call), ...extra,
+  };
+}
+function callTitle(call, userId) {
+  const chat = db.chats[call.chatId];
+  if (chat?.type === 'group' && chat.members.includes(userId)) return chat.name || 'Group call';
+  const otherIds = [...call.participants.keys()].filter((id) => id !== userId);
+  if (otherIds.length > 1) return 'Group call';
+  return db.users[otherIds[0]]?.name || 'Voice call';
+}
+function callParticipantViews(call) {
+  return [...call.participants.values()].map((participant) => ({
+    id: participant.id, name: db.users[participant.id]?.name || 'Someone',
+    picture: db.users[participant.id]?.picture || null, status: participant.status,
+  }));
 }
 function callError(ws, callId, error) {
   ws.send(JSON.stringify({ t: 'call', action: 'error', callId, error }));
 }
-function recordCallHistory(call, results, endedAt = now()) {
-  for (const [userId, result] of Object.entries(results)) {
+function callStatusActive(status) { return status === 'connected' || status === 'ringing'; }
+function recordCallHistory(call, endedAt = now()) {
+  const participantIds = [...call.participants.keys()];
+  for (const participant of call.participants.values()) {
+    const userId = participant.id;
     if (!db.users[userId]) continue;
     const history = db.callHistory[userId] ||= [];
     if (history.some((entry) => entry.id === call.id)) continue;
+    let result;
+    if (userId === call.hostId ? call.connectedAt : participant.joinedAt && call.connectedAt) result = 'completed';
+    else if (userId === call.hostId) {
+      const inviteStatuses = [...call.participants.values()]
+        .filter((entry) => entry.id !== call.hostId)
+        .map((entry) => entry.status);
+      if (inviteStatuses.includes('declined')) result = 'declined';
+      else if (inviteStatuses.includes('missed') || inviteStatuses.includes('ringing')) result = 'no-answer';
+      else if (inviteStatuses.length && inviteStatuses.every((status) => status === 'busy')) result = 'busy';
+      else if (inviteStatuses.length && inviteStatuses.every((status) => status === 'unavailable')) result = 'unavailable';
+      else result = call.endReason === 'cancelled' ? 'cancelled' : 'failed';
+    }
+    else if (participant.status === 'declined') result = 'declined';
+    else if (participant.status === 'busy' || participant.status === 'unavailable') result = participant.status;
+    else if (participant.status === 'missed' || participant.status === 'ringing') result = userId === call.hostId ? 'no-answer' : 'missed';
+    else if (participant.status === 'connected') result = 'failed';
+    else result = 'cancelled';
+    const peerId = participantIds.find((id) => id !== userId) || call.hostId;
     history.unshift({
-      id: call.id, chatId: call.chatId,
-      peerId: userId === call.callerId ? call.calleeId : call.callerId,
-      direction: userId === call.callerId ? 'outgoing' : 'incoming',
+      id: call.id, chatId: call.chatId, peerId, participantIds,
+      title: callTitle(call, userId), groupCall: call.chatType === 'group' || participantIds.length > 2,
+      direction: userId === call.hostId ? 'outgoing' : 'incoming',
       result, startedAt: call.startedAt, endedAt,
-      durationMs: call.connectedAt ? Math.max(0, endedAt - call.connectedAt) : 0,
+      durationMs: call.connectedAt && participant.joinedAt ? Math.max(0, endedAt - participant.joinedAt) : 0,
     });
     if (history.length > CALL_HISTORY_LIMIT) history.length = CALL_HISTORY_LIMIT;
     sendTo(userId, { t: 'call-history-updated' });
@@ -891,20 +934,68 @@ function recordCallHistory(call, results, endedAt = now()) {
   save();
 }
 function endCall(call, action, fromId, extra = {}) {
+  if (activeCalls.get(call.id) !== call) return;
   clearTimeout(call.timer);
+  for (const timer of call.inviteTimers.values()) clearTimeout(timer);
+  call.inviteTimers.clear();
   activeCalls.delete(call.id);
-  const results = call.connectedAt
-    ? { [call.callerId]: 'completed', [call.calleeId]: 'completed' }
-    : action === 'rejected'
-      ? { [call.callerId]: 'declined', [call.calleeId]: 'declined' }
-      : extra.reason === 'cancelled'
-        ? { [call.callerId]: 'cancelled', [call.calleeId]: 'cancelled' }
-        : { [call.callerId]: 'failed', [call.calleeId]: 'failed' };
-  recordCallHistory(call, results);
-  for (const id of [call.callerId, call.calleeId]) notifyCall(id, call, action, fromId, extra);
+  call.endReason = extra.reason || action;
+  recordCallHistory(call);
+  const recipients = [...call.participants.values()].filter((participant) => callStatusActive(participant.status));
+  for (const participant of recipients) notifyCall(participant.id, call, action, fromId, extra);
 }
 function activeCallFor(userId) {
-  return [...activeCalls.values()].find((call) => call.callerId === userId || call.calleeId === userId);
+  return [...activeCalls.values()].find((call) => callStatusActive(call.participants.get(userId)?.status));
+}
+function validCallTargets(ws, callId, userId, targetIds, maximum) {
+  if (!Array.isArray(targetIds) || targetIds.length < 1 || targetIds.length > maximum
+    || targetIds.some((id) => typeof id !== 'string' || id === userId || !db.users[id])
+    || new Set(targetIds).size !== targetIds.length) {
+    callError(ws, callId, `choose between 1 and ${maximum} valid people to call`);
+    return false;
+  }
+  return true;
+}
+function addCallInvitees(call, callerId, targetIds) {
+  const ringing = [];
+  for (const id of targetIds) {
+    const previous = call.participants.get(id);
+    if (previous && callStatusActive(previous.status)) continue;
+    const occupied = activeCallFor(id);
+    const participant = { id, status: 'ringing', ws: null, joinedAt: 0 };
+    call.participants.set(id, participant);
+    if (occupied || !isOnline(id)) {
+      participant.status = occupied ? 'busy' : 'unavailable';
+      continue;
+    }
+    ringing.push(id);
+    const timer = setTimeout(() => {
+      const current = call.participants.get(id);
+      if (activeCalls.get(call.id) !== call || current?.status !== 'ringing') return;
+      call.inviteTimers.delete(id);
+      current.status = 'missed';
+      notifyCall(id, call, 'missed', call.hostId, { reason: 'timeout' });
+      for (const active of call.participants.values()) {
+        if (active.id !== id && active.status === 'connected') notifyCall(active.id, call, 'participants-updated', id);
+      }
+    }, CALL_RING_MS);
+    call.inviteTimers.set(id, timer);
+  }
+  for (const id of ringing) notifyCall(id, call, 'incoming', callerId);
+}
+function participantLeft(call, userId, reason) {
+  const participant = call.participants.get(userId);
+  if (!participant || !callStatusActive(participant.status)) return;
+  const timer = call.inviteTimers.get(userId);
+  if (timer) clearTimeout(timer);
+  call.inviteTimers.delete(userId);
+  participant.status = 'left';
+  participant.ws = null;
+  for (const active of call.participants.values()) {
+    if (active.id !== userId && active.status === 'connected') {
+      notifyCall(active.id, call, 'participant-left', userId, { reason });
+    }
+  }
 }
 function handleCallMessage(user, ws, m) {
   if (typeof m.callId !== 'string' || !CALL_ID_RE.test(m.callId)) {
@@ -912,77 +1003,89 @@ function handleCallMessage(user, ws, m) {
   }
   if (m.action === 'invite') {
     const chat = db.chats[m.chatId];
-    if (!chat || chat.type !== 'direct' || chat.members.length !== 2 || !chat.members.includes(user.id)) {
-      return callError(ws, m.callId, 'voice calls require a direct chat');
+    const targetIds = m.participantIds || (typeof m.peerId === 'string' ? [m.peerId] : null);
+    if (!chat || !['direct', 'group'].includes(chat.type) || !chat.members.includes(user.id)) {
+      return callError(ws, m.callId, 'start calls from a chat you belong to');
     }
-    const calleeId = chat.members.find((id) => id !== user.id);
+    if (!validCallTargets(ws, m.callId, user.id, targetIds, CALL_MAX_PARTICIPANTS - 1)) return;
     if (activeCalls.has(m.callId)) return callError(ws, m.callId, 'call id already in use');
-    const occupied = activeCallFor(user.id) || activeCallFor(calleeId);
-    if (occupied) {
-      recordCallHistory({
-        id: m.callId, chatId: chat.id, callerId: user.id, calleeId, startedAt: now(),
-      }, { [user.id]: 'busy' });
-      return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'busy', calleeId);
-    }
-    if (!isOnline(calleeId)) {
-      recordCallHistory({
-        id: m.callId, chatId: chat.id, callerId: user.id, calleeId, startedAt: now(),
-      }, { [user.id]: 'unavailable', [calleeId]: 'missed' });
-      return notifyCall(user.id, { id: m.callId, chatId: chat.id }, 'unavailable', calleeId);
-    }
-    const call = { id: m.callId, chatId: chat.id, callerId: user.id, calleeId, callerWs: ws, status: 'ringing', startedAt: now(), timer: null };
-    call.timer = setTimeout(() => {
-      if (activeCalls.get(call.id) !== call) return;
-      activeCalls.delete(call.id);
-      recordCallHistory(call, { [call.callerId]: 'no-answer', [call.calleeId]: 'missed' });
-      notifyCall(call.callerId, call, 'timeout', call.calleeId);
-      notifyCall(call.calleeId, call, 'missed', call.callerId);
-    }, CALL_RING_MS);
+    if (activeCallFor(user.id)) return callError(ws, m.callId, 'you are already in a call');
+    const call = {
+      id: m.callId, chatId: chat.id, chatType: chat.type, hostId: user.id,
+      participants: new Map(), inviteTimers: new Map(), startedAt: now(), connectedAt: 0,
+    };
+    call.participants.set(user.id, { id: user.id, status: 'connected', ws, joinedAt: 0 });
     activeCalls.set(call.id, call);
-    sendTo(calleeId, { t: 'chat', chat: chatView(chat, calleeId) });
-    notifyCall(calleeId, call, 'incoming', user.id);
+    addCallInvitees(call, user.id, targetIds);
     notifyCall(user.id, call, 'ringing', user.id);
     return;
   }
 
   const call = activeCalls.get(m.callId);
-  if (!call || ![call.callerId, call.calleeId].includes(user.id)) {
+  const participant = call?.participants.get(user.id);
+  if (!call || !participant || !callStatusActive(participant.status)) {
     return callError(ws, m.callId, 'call not found');
   }
-  const isCaller = user.id === call.callerId;
   switch (m.action) {
+    case 'add': {
+      if (![...call.participants.values()].some((entry) => entry.id !== user.id && entry.status === 'connected')) {
+        return callError(ws, m.callId, 'wait until another participant answers before adding people');
+      }
+      const targetIds = m.participantIds;
+      const availableSlots = CALL_MAX_PARTICIPANTS - [...call.participants.values()].filter((entry) => callStatusActive(entry.status)).length;
+      if (availableSlots < 1) return callError(ws, m.callId, 'this call has reached its 4-person limit');
+      if (!validCallTargets(ws, m.callId, user.id, targetIds, Math.min(CALL_MAX_PARTICIPANTS - 1, availableSlots))) return;
+      addCallInvitees(call, user.id, targetIds);
+      for (const active of call.participants.values()) {
+        if (active.status === 'connected') notifyCall(active.id, call, 'participants-updated', user.id);
+      }
+      return;
+    }
     case 'accept':
-      if (isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be answered');
-      call.status = 'connected'; call.calleeWs = ws; clearTimeout(call.timer);
-      notifyCallSocket(call.callerWs, call, 'accepted', user.id);
-      sendTo(user.id, { t: 'call', action: 'answered', callId: call.id, chatId: call.chatId, from: user.id }, ws);
+      if (participant.status !== 'ringing') return callError(ws, m.callId, 'this call invite can no longer be answered');
+      clearTimeout(call.inviteTimers.get(user.id));
+      call.inviteTimers.delete(user.id);
+      participant.status = 'connected'; participant.ws = ws; participant.joinedAt = now();
+      call.connectedAt ||= participant.joinedAt;
+      const host = call.participants.get(call.hostId);
+      if (host) host.joinedAt ||= participant.joinedAt;
+      sendTo(user.id, { t: 'call', action: 'answered', callId: call.id }, ws);
+      for (const active of call.participants.values()) {
+        if (active.id !== user.id && active.status === 'connected') notifyCall(active.id, call, 'participant-joined', user.id);
+      }
+      notifyCallSocket(ws, call, 'joined', user.id, {}, user.id);
       return;
     case 'reject':
-      if (isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be declined');
-      endCall(call, 'rejected', user.id);
+      if (participant.status !== 'ringing') return callError(ws, m.callId, 'this call invite can no longer be declined');
+      clearTimeout(call.inviteTimers.get(user.id));
+      call.inviteTimers.delete(user.id);
+      participant.status = 'declined';
+      sendTo(user.id, { t: 'call', action: 'answered', callId: call.id }, ws);
+      for (const active of call.participants.values()) {
+        if (active.status === 'connected') notifyCall(active.id, call, 'participants-updated', user.id);
+      }
       return;
     case 'cancel':
-      if (!isCaller || call.status !== 'ringing') return callError(ws, m.callId, 'call can no longer be cancelled');
-      endCall(call, 'ended', user.id, { reason: 'cancelled' });
-      return;
     case 'end':
-      endCall(call, 'ended', user.id, { reason: 'ended' });
+      if (user.id === call.hostId) endCall(call, 'ended', user.id, { reason: m.action === 'cancel' ? 'cancelled' : 'ended' });
+      else participantLeft(call, user.id, 'ended');
+      return;
+    case 'leave':
+      if (user.id === call.hostId) endCall(call, 'ended', user.id, { reason: 'host-left' });
+      else participantLeft(call, user.id, 'ended');
       return;
     case 'connected':
-      if (call.status !== 'connected' || (isCaller ? ws !== call.callerWs : ws !== call.calleeWs)) {
-        return callError(ws, m.callId, 'call is not connected');
-      }
+      if (participant.ws !== ws) return callError(ws, m.callId, 'call is not connected');
       call.connectedAt ||= now();
       return;
     case 'signal': {
-      if (call.status !== 'connected') return callError(ws, m.callId, 'call is not connected');
-      if ((isCaller && ws !== call.callerWs) || (!isCaller && ws !== call.calleeWs)) {
+      const target = call.participants.get(m.to);
+      if (participant.status !== 'connected' || participant.ws !== ws || !target || target.status !== 'connected' || user.id === target.id) {
         return callError(ws, m.callId, 'call signaling must use the active call connection');
       }
       let payload;
       if (m.kind === 'offer' || m.kind === 'answer') {
-        if ((m.kind === 'offer' && !isCaller) || (m.kind === 'answer' && isCaller)
-          || !m.description || m.description.type !== m.kind
+        if (!m.description || m.description.type !== m.kind
           || typeof m.description.sdp !== 'string' || m.description.sdp.length > 16_000) {
           return callError(ws, m.callId, 'invalid call description');
         }
@@ -1002,7 +1105,7 @@ function handleCallMessage(user, ws, m) {
           ...(c.usernameFragment == null ? {} : { usernameFragment: c.usernameFragment }),
         } };
       } else return callError(ws, m.callId, 'unsupported call signal');
-      notifyCallSocket(isCaller ? call.calleeWs : call.callerWs, call, m.kind, user.id, payload);
+      notifyCallSocket(target.ws, call, m.kind, user.id, payload, target.id);
       return;
     }
     default:
@@ -1043,17 +1146,16 @@ function onConnect(user, ws) {
   };
   ws.onclose = () => {
     for (const call of [...activeCalls.values()]) {
-      if (call.callerWs === ws || call.calleeWs === ws) endCall(call, 'ended', user.id, { reason: 'connection-lost' });
+      const participant = call.participants.get(user.id);
+      if (participant?.ws !== ws) continue;
+      if (user.id === call.hostId) endCall(call, 'ended', user.id, { reason: 'connection-lost' });
+      else participantLeft(call, user.id, 'connection-lost');
     }
     allSockets.delete(ws);
     const set = conns.get(user.id);
     set?.delete(ws);
     if (set && set.size === 0) {
       conns.delete(user.id);
-      for (const call of [...activeCalls.values()]) {
-        if (call.callerId !== user.id && call.calleeId !== user.id) continue;
-        endCall(call, 'ended', user.id, { reason: 'connection-lost' });
-      }
       user.lastSeen = now(); save();
       broadcastPresence(user);
     }
